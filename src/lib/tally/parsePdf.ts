@@ -108,14 +108,17 @@ function parsePage(text: string): ParsedInvoice | null {
     }
   }
 
-  const startMarker = "No. Rate";
-  const startIdx = text.indexOf(startMarker);
-  if (startIdx === -1) return { invoiceNo, date, buyer, items: [], printedTotal: null };
+  // The whitespace between "No." and "Rate" isn't always a literal space --
+  // some invoices (e-Invoices with an IRN/Ack No. header, at least) wrap
+  // this table header across a tab instead, so this has to match either.
+  const startMarkerMatch = text.match(/No\.\s*Rate/);
+  if (!startMarkerMatch) return { invoiceNo, date, buyer, items: [], printedTotal: null };
+  const startIdx = startMarkerMatch.index!;
 
   // fullBody keeps going past the items block -- the printed "Total N Nos"
   // line used for validation comes after SGST/CGST/Rounding, outside the
   // truncated `body` used for item parsing.
-  const fullBody = text.slice(startIdx + startMarker.length);
+  const fullBody = text.slice(startIdx + startMarkerMatch[0].length);
   let endIdx = fullBody.length;
   for (const marker of ["SGST Output", "CGST Output", "IGST Output", "continued to page number"]) {
     const i = fullBody.indexOf(marker);

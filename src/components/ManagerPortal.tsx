@@ -1,0 +1,424 @@
+"use client";
+
+import { useCallback, useEffect, useState } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { AppShell, Empty, Loading } from "./AppShell";
+import { CommittedPanel } from "./CommittedPanel";
+import { InventoryPanel } from "./InventoryPanel";
+import { DashboardPanel } from "./DashboardPanel";
+import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
+import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
+import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
+import { monthBounds, thisMonthISO } from "@/lib/dates";
+import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
+import { workOrderNo } from "@/lib/orders/workOrderNo";
+import { sendOrderToConsignment } from "@/app/manager/orders/actions";
+import { BoxIcon, BuildingIcon, ChartIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, UploadIcon } from "./icons";
+
+interface SkuRow {
+  id: string;
+  name: string;
+  commitment_per_month: number | null;
+  account_id: string;
+  accounts: { label: string; commitment_start: string | null } | null;
+}
+
+interface UsageRow {
+  account_id: string;
+  sku_id: string;
+  location_id: string;
+  qty: number;
+}
+
+interface TallyLineRow {
+  sku_id: string | null;
+  qty: number;
+}
+
+interface BilledConsignmentRow {
+  sku_id: string;
+  qty: number;
+}
+
+interface BillingLineRow {
+  order_line_id: string | null;
+  status: string;
+}
+
+interface ClosedSaleableRow {
+  order_lines: { sku_id: string; qty: number }[];
+}
+
+type OrderRow = OrderDetail;
+
+export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolean }) {
+  const supabase = createClient();
+
+  const [month, setMonth] = useState(thisMonthISO());
+  const [skus, setSkus] = useState<SkuRow[] | null>(null);
+  const [usage, setUsage] = useState<UsageRow[] | null>(null);
+  const [tallyLines, setTallyLines] = useState<TallyLineRow[] | null>(null);
+  const [billedConsignment, setBilledConsignment] = useState<BilledConsignmentRow[] | null>(null);
+  const [closedSaleable, setClosedSaleable] = useState<ClosedSaleableRow[] | null>(null);
+  const [orders, setOrders] = useState<OrderRow[] | null>(null);
+  const [selectedOrder, setSelectedOrder] = useState<OrderRow | null>(null);
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [deletingOrderId, setDeletingOrderId] = useState<string | null>(null);
+  const [sentLineIds, setSentLineIds] = useState<Set<string>>(new Set());
+  const [sendingOrderId, setSendingOrderId] = useState<string | null>(null);
+  const [fulfilling, setFulfilling] = useState<{ order: OrderRow; mode: "dc" | "invoice" } | null>(null);
+
+  const load = useCallback(async () => {
+    const { start, end } = monthBounds(month);
+
+    const [
+      { data: skuRows },
+      { data: usageRows },
+      { data: tallyRows },
+      { data: billedRows },
+      { data: closedSaleableRows },
+      { data: orderRows },
+      { data: billingLineRows },
+    ] = await Promise.all([
+      supabase
+        .from("skus")
+        .select("id, name, commitment_per_month, account_id, accounts(label, commitment_start)")
+        .order("name")
+        .returns<SkuRow[]>(),
+      supabase
+        .from("usage_log")
+        .select("account_id, sku_id, location_id, qty")
+        .gte("entry_date", start)
+        .lt("entry_date", end)
+        .returns<UsageRow[]>(),
+      // Vs Committed's Actual comes from confirmed Tally invoice lines, not
+      // hospital-reported usage_log (still fetched above, but only for the
+      // "Centers Reporting" activity stat now) -- plus, below, consignment
+      // usage that's been billed (its own invoice number/date, not a Tally
+      // import) and closed Saleable orders (invoiced directly on the order),
+      // both keyed the same way by invoice_date.
+      supabase
+        .from("tally_invoice_lines")
+        .select("sku_id, qty")
+        .gte("invoice_date", start)
+        .lt("invoice_date", end)
+        .returns<TallyLineRow[]>(),
+      supabase
+        .from("billing_requests")
+        .select("sku_id, qty")
+        .eq("status", "billed")
+        .gte("invoice_date", start)
+        .lt("invoice_date", end)
+        .returns<BilledConsignmentRow[]>(),
+      supabase
+        .from("orders")
+        .select("order_lines(sku_id, qty)")
+        .eq("order_type", "saleable")
+        .eq("status", "closed")
+        .gte("invoice_date", start)
+        .lt("invoice_date", end)
+        .returns<ClosedSaleableRow[]>(),
+      supabase
+        .from("orders")
+        .select(
+          "id, order_type, status, account_id, location_id, po_number, po_attachment_url, requested_date, delivery_instruction, comment, created_at, accounts(label), account_locations(name), order_lines(id, qty, net_price, notes, skus(name))"
+        )
+        .order("created_at", { ascending: false })
+        .limit(50)
+        .returns<OrderRow[]>(),
+      supabase.from("billing_requests").select("order_line_id, status").not("order_line_id", "is", null).returns<BillingLineRow[]>(),
+    ]);
+
+    setSkus(skuRows ?? []);
+    setUsage(usageRows ?? []);
+    setTallyLines(tallyRows ?? []);
+    setBilledConsignment(billedRows ?? []);
+    setClosedSaleable(closedSaleableRows ?? []);
+    setOrders(orderRows ?? []);
+    setSentLineIds(new Set((billingLineRows ?? []).map((b) => b.order_line_id as string)));
+  }, [month, supabase]);
+
+  useEffect(() => {
+    void (async () => {
+      await load();
+    })();
+  }, [load]);
+
+  async function deleteOrder(o: OrderRow, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (!confirm(`Delete order ${workOrderNo(o.id, o.created_at)}? This removes its line items too and can't be undone.`)) {
+      return;
+    }
+    setDeletingOrderId(o.id);
+    const { error } = await supabase.from("orders").delete().eq("id", o.id);
+    setDeletingOrderId(null);
+    if (error) {
+      // 23503 = foreign key violation -- at least one line has already been
+      // sent to Consignment, so billing_requests still references it. Same
+      // "fail loudly, don't cascade away billed history" pattern as deleteSku.
+      if (error.code === "23503") {
+        alert(
+          "Can't delete this order — it's already in the Consignment pipeline. Delete its entries there first if you need to undo it."
+        );
+      } else {
+        alert("Couldn't delete the order: " + error.message);
+      }
+      return;
+    }
+    if (selectedOrder?.id === o.id) setSelectedOrder(null);
+    load();
+  }
+
+  async function sendToConsignment(o: OrderRow, e: React.MouseEvent) {
+    e.stopPropagation();
+    if (
+      !confirm(
+        `Send ${workOrderNo(o.id, o.created_at)} to Consignment? This creates a pending entry in Consignment's Usage Log for each of its ${o.order_lines.length} line item(s), ready to Record.`
+      )
+    ) {
+      return;
+    }
+    setSendingOrderId(o.id);
+    const res = await sendOrderToConsignment(o.id);
+    setSendingOrderId(null);
+    if (!res.success) {
+      alert("Couldn't send to consignment: " + res.message);
+      return;
+    }
+    load();
+  }
+
+  async function updateCommitment(skuId: string, value: string) {
+    const parsed = value.trim() === "" ? null : parseInt(value, 10);
+    setSavingKey(skuId);
+    await supabase.from("skus").update({ commitment_per_month: parsed }).eq("id", skuId);
+    setSavingKey(null);
+    load();
+  }
+
+  if (
+    skus === null ||
+    usage === null ||
+    tallyLines === null ||
+    billedConsignment === null ||
+    closedSaleable === null ||
+    orders === null
+  ) {
+    return (
+      <AppShell
+        ctx="Account Manager"
+        stats={[]}
+        tabs={[{ id: "loading", label: "Loading", content: <Loading /> }]}
+        maxWidthClass="max-w-[1400px]"
+      />
+    );
+  }
+
+  const actualBySku = new Map<string, number>();
+  tallyLines.forEach((t) => {
+    if (!t.sku_id) return;
+    actualBySku.set(t.sku_id, (actualBySku.get(t.sku_id) ?? 0) + (t.qty || 0));
+  });
+  billedConsignment.forEach((b) => {
+    actualBySku.set(b.sku_id, (actualBySku.get(b.sku_id) ?? 0) + (b.qty || 0));
+  });
+  closedSaleable.forEach((o) => {
+    o.order_lines.forEach((l) => {
+      actualBySku.set(l.sku_id, (actualBySku.get(l.sku_id) ?? 0) + (l.qty || 0));
+    });
+  });
+
+  const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
+  const achievements = skus
+    .filter((s) => s.commitment_per_month)
+    .map((s) => (actualBySku.get(s.id) ?? 0) / (s.commitment_per_month as number));
+  const avgAch = achievements.length
+    ? Math.round((achievements.reduce((a, b) => a + b, 0) / achievements.length) * 100)
+    : null;
+
+  return (
+    <AppShell
+      ctx="Account Manager"
+      maxWidthClass="max-w-[1400px]"
+      stats={[
+        { value: centersReporting, label: "Centers Reporting" },
+        { value: skus.length, label: "Products Tracked" },
+        { value: avgAch === null ? "—" : `${avgAch}%`, label: "Avg Achievement" },
+      ]}
+      extraNav={
+        canManageAccounts
+          ? [
+              { href: "/accounts", label: "Accounts", icon: <BuildingIcon /> },
+              { href: "/manager/import", label: "Import", icon: <UploadIcon /> },
+            ]
+          : undefined
+      }
+      tabs={[
+        {
+          id: "dashboard",
+          label: "Dashboard",
+          icon: <DashboardIcon />,
+          content: <DashboardPanel />,
+        },
+        {
+          id: "committed",
+          label: "Vs Committed",
+          icon: <ChartIcon />,
+          content: (
+            <CommittedPanel
+              skus={skus}
+              actualBySku={actualBySku}
+              month={month}
+              setMonth={setMonth}
+              savingKey={savingKey}
+              updateCommitment={updateCommitment}
+            />
+          ),
+        },
+        {
+          id: "inventory",
+          label: "Inventory",
+          icon: <BoxIcon />,
+          content: <InventoryPanel />,
+        },
+        {
+          id: "orders",
+          label: "Orders",
+          icon: <ClipboardIcon />,
+          content: (
+            <div className="card">
+              <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Orders received</h3>
+              <p className="mb-3.5 text-xs text-muted">Last 50 orders, across every account and type.</p>
+              {orders.length === 0 ? (
+                <Empty title="No orders yet" body="Orders submitted through the Order Portal will show up here." />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="u-table">
+                    <thead>
+                      <tr>
+                        <th>Work Order #</th>
+                        <th>Date</th>
+                        <th>Type</th>
+                        <th>Account</th>
+                        <th>Location</th>
+                        <th>PO Number</th>
+                        <th>PO Attachment</th>
+                        <th>Lines</th>
+                        <th>Total (ex GST)</th>
+                        <th>Status</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {orders.map((o) => {
+                        const total = o.order_lines.reduce((a, l) => a + l.qty * (l.net_price ?? 0), 0);
+                        return (
+                          <tr key={o.id} className="cursor-pointer hover:bg-cream" onClick={() => setSelectedOrder(o)}>
+                            <td className="whitespace-nowrap font-mono text-[11.5px]">{workOrderNo(o.id, o.created_at)}</td>
+                            <td>{new Date(o.created_at).toLocaleDateString()}</td>
+                            <td>{ORDER_TYPE_LABELS[o.order_type]}</td>
+                            <td>{o.accounts?.label ?? "—"}</td>
+                            <td>{o.account_locations?.name ?? "—"}</td>
+                            <td>{o.po_number || "—"}</td>
+                            <td>
+                              {o.po_attachment_url ? (
+                                <a
+                                  href={o.po_attachment_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-bold text-brand hover:underline"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  View
+                                </a>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td>{o.order_lines.length}</td>
+                            <td>{total.toLocaleString("en-IN")}</td>
+                            <td>
+                              <span className={`badge ${o.status === "closed" ? "badge-good" : "badge-neutral"}`}>
+                                {o.status}
+                              </span>
+                            </td>
+                            <td className="whitespace-nowrap">
+                              <div className="flex gap-1.5">
+                                {(o.order_type === "long_term_consignment" || o.order_type === "short_term_consignment") &&
+                                  o.status !== "cancelled" &&
+                                  o.status !== "closed" && (
+                                    <button
+                                      type="button"
+                                      className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setFulfilling({ order: o, mode: "dc" });
+                                      }}
+                                    >
+                                      Enter DC
+                                    </button>
+                                  )}
+                                {o.order_type === "saleable" && o.status !== "cancelled" && o.status !== "closed" && (
+                                  <button
+                                    type="button"
+                                    className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setFulfilling({ order: o, mode: "invoice" });
+                                    }}
+                                  >
+                                    Submit
+                                  </button>
+                                )}
+                                {(o.order_type === "long_term_consignment_consumption" ||
+                                  o.order_type === "short_term_consignment_consumption") &&
+                                  o.status !== "cancelled" &&
+                                  !o.order_lines.some((l) => sentLineIds.has(l.id)) && (
+                                    <button
+                                      type="button"
+                                      className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                      disabled={sendingOrderId === o.id}
+                                      onClick={(e) => sendToConsignment(o, e)}
+                                    >
+                                      {sendingOrderId === o.id ? "Sending…" : "Send to Consignment"}
+                                    </button>
+                                  )}
+                                <button
+                                  type="button"
+                                  className="btn-outline-danger !px-2.5 !py-1 text-[11px]"
+                                  disabled={deletingOrderId === o.id}
+                                  onClick={(e) => deleteOrder(o, e)}
+                                >
+                                  {deletingOrderId === o.id ? "Deleting…" : "Delete"}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {selectedOrder && <OrderDetailModal order={selectedOrder} onClose={() => setSelectedOrder(null)} />}
+              {fulfilling && (
+                <OrderFulfillmentModal
+                  order={fulfilling.order}
+                  mode={fulfilling.mode}
+                  onClose={() => setFulfilling(null)}
+                  onDone={load}
+                />
+              )}
+            </div>
+          ),
+        },
+        {
+          id: "consignment",
+          label: "Consignment",
+          icon: <ReceiptIcon />,
+          content: <ConsignmentBillingPanel />,
+        },
+      ]}
+    />
+  );
+}

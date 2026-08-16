@@ -1,26 +1,133 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --color-cream: #f3f6fc;
+  --color-card: #ffffff;
+  --color-header: #e6edfa;
+  --color-header-border: #cddaf2;
+  --color-border: #dbe5f6;
+  --color-ink: #172544;
+  --color-ink-soft: #2a3d64;
+  --color-muted: #6b7c9e;
+  --color-muted-strong: #47597e;
+  --color-brand: #2f5fc7;
+  --color-brand-dark: #1f3f8f;
+  --color-accent: #4a7fe0;
+  --color-accent-2: #2f5fc7;
+  --color-good-bg: #e8f8f0;
+  --color-good-fg: #1e8449;
+  --color-watch-bg: #fef3e2;
+  --color-watch-fg: #d68910;
+  --color-bad-bg: #fde8e8;
+  --color-bad-fg: #c0392b;
+  --color-neutral-bg: #e8f4ff;
+  --color-neutral-fg: #2471a3;
+  --color-teal: #0e9488;
+  --color-teal-dark: #0a6d63;
+  --color-violet: #7c5cbf;
+  --color-violet-dark: #5c3f99;
+  --color-amber: #d68910;
+  --color-amber-dark: #a86a09;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-cream: var(--color-cream);
+  --color-card: var(--color-card);
+  --color-header: var(--color-header);
+  --color-header-border: var(--color-header-border);
+  --color-border: var(--color-border);
+  --color-ink: var(--color-ink);
+  --color-ink-soft: var(--color-ink-soft);
+  --color-muted: var(--color-muted);
+  --color-muted-strong: var(--color-muted-strong);
+  --color-brand: var(--color-brand);
+  --color-brand-dark: var(--color-brand-dark);
+  --color-accent: var(--color-accent);
+  --color-accent-2: var(--color-accent-2);
+  --color-good-bg: var(--color-good-bg);
+  --color-good-fg: var(--color-good-fg);
+  --color-watch-bg: var(--color-watch-bg);
+  --color-watch-fg: var(--color-watch-fg);
+  --color-bad-bg: var(--color-bad-bg);
+  --color-bad-fg: var(--color-bad-fg);
+  --color-neutral-bg: var(--color-neutral-bg);
+  --color-neutral-fg: var(--color-neutral-fg);
+  --color-teal: var(--color-teal);
+  --color-teal-dark: var(--color-teal-dark);
+  --color-violet: var(--color-violet);
+  --color-violet-dark: var(--color-violet-dark);
+  --color-amber: var(--color-amber);
+  --color-amber-dark: var(--color-amber-dark);
+  --font-sans: var(--font-inter), "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-cream);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+@keyframes tabFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@layer components {
+  .card {
+    @apply rounded-[10px] bg-card p-4 border border-border shadow-[0_1px_3px_rgba(23,37,68,0.06)];
+  }
+
+  .field-label {
+    @apply block text-[12.5px] font-semibold text-ink-soft mb-1;
+  }
+
+  .field-input {
+    @apply w-full rounded-[6px] border border-[#c3cee2] bg-[#eef2f9] px-3 py-2 text-[13.5px] text-ink outline-none transition-colors focus:border-accent focus:bg-card focus:ring-2 focus:ring-accent/15 disabled:bg-[#f2f5fa] disabled:text-muted;
+  }
+
+  .btn-primary {
+    @apply rounded-[6px] bg-linear-to-b from-brand to-brand-dark px-5 py-2.5 text-[13.5px] font-bold text-white shadow-[0_1px_2px_rgba(31,63,143,0.35)] transition-[filter,box-shadow,transform] hover:brightness-110 hover:shadow-[0_3px_10px_rgba(31,63,143,0.35)] active:translate-y-px disabled:opacity-50 disabled:hover:brightness-100 disabled:hover:shadow-[0_1px_2px_rgba(31,63,143,0.35)];
+  }
+
+  .btn-outline-danger {
+    @apply rounded-[6px] border border-[#e3aeae] bg-card px-4 py-2 text-[12.5px] font-bold text-bad-fg transition-colors hover:bg-bad-bg;
+  }
+
+  .badge {
+    @apply inline-block rounded-[3px] px-2.5 py-0.5 text-[10.5px] font-bold;
+  }
+
+  .badge-good { @apply bg-good-bg text-good-fg; }
+  .badge-watch { @apply bg-watch-bg text-watch-fg; }
+  .badge-bad { @apply bg-bad-bg text-bad-fg; }
+  .badge-neutral { @apply bg-neutral-bg text-neutral-fg; }
+
+  /* min-w-full, not w-full: a table with too many columns for its container
+     (Inventory's 10-column stock tables) needs to grow past 100% and let its
+     overflow-x-auto wrapper scroll it — w-full would force-fit it into the
+     container instead, squeezing every cell and wrapping long text into many
+     lines. min-w-full keeps the old fill-the-container look for tables that
+     fit fine while letting wide ones grow naturally. */
+  .u-table {
+    @apply min-w-full border-collapse text-[12.5px];
+  }
+  .u-table th {
+    @apply bg-[#e9edf6] px-2.5 py-2 text-left text-[12px] font-bold text-ink-soft border-b border-border;
+  }
+  .u-table td {
+    @apply border-b border-[#e3eaf7] px-2.5 py-2 align-top text-ink;
+  }
+  .u-table tr:last-child td { @apply border-b-0; }
+  .u-table tr:nth-child(even) td { @apply bg-[#f7f9fd]; }
+
+  /* Dark utility panel — e.g. the "Add Product" boxes on order-entry screens */
+  .panel-dark {
+    @apply rounded-[4px] bg-ink-soft p-5 text-center text-white;
+  }
 }

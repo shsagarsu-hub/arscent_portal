@@ -33,12 +33,36 @@ export interface CreateOrderInput {
   lines: OrderLineInput[];
 }
 
+// Order types a hospital login is allowed to place themselves -- the
+// manager-only types (capital_sales, direct_ship, export, sales_return) and
+// the two consumption types (created only via HospitalPortal's Log Usage,
+// never through this action) are excluded. This is defense-in-depth: the
+// `orders` INSERT RLS policy is the actual backstop and already rejects
+// both a mismatched account_id and a manager-only order_type for a hospital
+// caller, but failing fast here gives a clearer error than a raw RLS
+// violation and avoids relying on RLS being the only thing standing between
+// a hospital login and placing orders against another hospital's account.
+const HOSPITAL_PLACEABLE_TYPES: OrderType[] = ["saleable", "long_term_consignment", "short_term_consignment"];
+
 export async function createOrder(input: CreateOrderInput) {
   const supabase = await createClient();
   const {
     data: { user },
   } = await supabase.auth.getUser();
   if (!user) return { success: false as const, message: "Not signed in." };
+
+  const { data: profile } = await supabase.from("profiles").select("role, account_id").eq("id", user.id).maybeSingle();
+  if (!profile) return { success: false as const, message: "No profile found for this login." };
+  if (profile.role === "hospital") {
+    if (!HOSPITAL_PLACEABLE_TYPES.includes(input.orderType)) {
+      return { success: false as const, message: "That order type isn't available to place directly." };
+    }
+    if (profile.account_id && profile.account_id !== input.accountId) {
+      return { success: false as const, message: "You can only place orders against your own account." };
+    }
+  } else if (profile.role !== "account_manager" && profile.role !== "admin") {
+    return { success: false as const, message: "Not authorized." };
+  }
 
   if (!input.locationId) return { success: false as const, message: "Select Ship To first." };
   if (input.lines.length === 0) return { success: false as const, message: "Add at least one product." };
@@ -261,6 +285,10 @@ export interface ConsignmentBalanceLine {
  */
 export async function getConsignmentBalance(accountId: string, locationId: string) {
   const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { success: false as const, message: "Not signed in." };
   if (!accountId || !locationId) return { success: false as const, message: "Select Sold To and Ship To first." };
 
   const { data, error } = await supabase

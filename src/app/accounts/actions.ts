@@ -21,6 +21,7 @@ async function requireManager() {
   if (!profile || (profile.role !== "admin" && profile.role !== "account_manager")) {
     redirect("/");
   }
+  return profile.role as "admin" | "account_manager";
 }
 
 function str(formData: FormData, key: string) {
@@ -127,8 +128,27 @@ export async function createLocationLogin(accountId: string, locationId: string 
   revalidatePath("/accounts");
 }
 
+/**
+ * account_manager and admin are otherwise treated as equivalent everywhere
+ * in this app, but login management is the one place that distinction
+ * actually matters: without this, any account_manager could call
+ * updateLogin/deleteLogin with an arbitrary userId -- including another
+ * account_manager's or an admin's -- and hijack or delete that login. Only
+ * an actual admin may touch a non-hospital login; account_manager is
+ * restricted to the hospital logins /accounts already scopes it to.
+ */
+async function requireManagerCanTarget(callerRole: "admin" | "account_manager", targetUserId: string) {
+  if (callerRole === "admin") return;
+  const admin = createAdminClient();
+  const { data: target } = await admin.from("profiles").select("role").eq("id", targetUserId).maybeSingle();
+  if (!target || target.role !== "hospital") {
+    throw new Error("Only an admin can manage this login.");
+  }
+}
+
 export async function updateLogin(userId: string, formData: FormData) {
-  await requireManager();
+  const callerRole = await requireManager();
+  await requireManagerCanTarget(callerRole, userId);
   const admin = createAdminClient();
 
   const email = str(formData, "email")?.toLowerCase() ?? null;
@@ -152,7 +172,8 @@ export async function deleteLogin(userId: string) {
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
   if (user.id === userId) throw new Error("You can't delete the login you're currently signed in with.");
-  await requireManager();
+  const callerRole = await requireManager();
+  await requireManagerCanTarget(callerRole, userId);
 
   const admin = createAdminClient();
 

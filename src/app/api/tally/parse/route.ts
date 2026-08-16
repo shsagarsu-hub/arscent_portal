@@ -1,6 +1,8 @@
 import { createClient } from "@/lib/supabase/server";
 import { parseTallyInvoicePdf } from "@/lib/tally/parsePdf";
 
+const MAX_BYTES = 10 * 1024 * 1024;
+
 export async function POST(request: Request) {
   const supabase = await createClient();
   const {
@@ -22,6 +24,9 @@ export async function POST(request: Request) {
   }
   if (file.type !== "application/pdf") {
     return Response.json({ error: "That's not a PDF file." }, { status: 400 });
+  }
+  if (file.size > MAX_BYTES) {
+    return Response.json({ error: "File is too large (10MB max)." }, { status: 400 });
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());

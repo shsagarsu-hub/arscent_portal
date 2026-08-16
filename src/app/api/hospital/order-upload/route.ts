@@ -2,6 +2,8 @@ import { createClient } from "@/lib/supabase/server";
 import { parseOrderExcel } from "@/lib/orders/parseOrderExcel";
 import { matchSkuFamily } from "@/lib/orders/skuFamilyMatch";
 
+const MAX_BYTES = 10 * 1024 * 1024;
+
 export async function POST(request: Request) {
   const supabase = await createClient();
   const {
@@ -25,6 +27,9 @@ export async function POST(request: Request) {
   }
   if (!/\.(xlsx|xlsm)$/i.test(file.name)) {
     return Response.json({ error: "That's not an Excel file (.xlsx or .xlsm)." }, { status: 400 });
+  }
+  if (file.size > MAX_BYTES) {
+    return Response.json({ error: "File is too large (10MB max)." }, { status: 400 });
   }
 
   const buffer = Buffer.from(await file.arrayBuffer());

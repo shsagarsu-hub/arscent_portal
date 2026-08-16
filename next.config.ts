@@ -36,17 +36,16 @@ const nextConfig: NextConfig = {
   serverExternalPackages: ["pdf-parse"],
   // serverExternalPackages keeps pdf-parse un-bundled, but Vercel's own
   // file tracer still decides which files actually ship with the deployed
-  // function -- it doesn't reliably follow pdf-parse's `new Worker(...)`
-  // call to pdf-parse/dist/worker/pdf.worker.mjs, since that path is
-  // resolved at runtime rather than via a statically-analyzable import.
-  // Without the worker file present, spawning it throws inside pdf.js's
-  // worker bootstrap in a way that crashes the whole function before this
-  // route's own try/catch ever runs -- the client sees a bare 500 with no
-  // body ("Unexpected end of JSON input") instead of a real error message.
-  // Confirmed live: this exact upload crashed in production with
-  // content-length: 0 before this fix.
+  // function, and it doesn't follow pdfjs-dist's (pdf-parse's own internal
+  // dependency) dynamic worker import. Confirmed live in production:
+  // "Setting up fake worker failed: Cannot find module
+  // '/var/task/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs'
+  // imported from .../pdfjs-dist/legacy/build/pdf.mjs" -- an earlier,
+  // narrower version of this only included pdf-parse's own dist folder,
+  // which doesn't contain pdfjs-dist at all (it's pdf-parse's dependency,
+  // not pdf-parse itself), so the actual missing file was never covered.
   outputFileTracingIncludes: {
-    "/api/tally/parse": ["./node_modules/pdf-parse/dist/**/*"],
+    "/api/tally/parse": ["./node_modules/pdf-parse/dist/**/*", "./node_modules/pdfjs-dist/legacy/**/*"],
   },
   // Without this, Turbopack walks up from the project looking for a
   // lockfile and can land on an unrelated one higher in the user's home

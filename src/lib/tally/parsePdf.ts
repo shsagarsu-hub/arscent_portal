@@ -1,5 +1,36 @@
 import "server-only";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { PDFParse } from "pdf-parse";
+
+// PDFParse spawns a real Node worker_threads.Worker to do the actual
+// parsing, defaulting to the relative path "./pdf.worker.mjs" -- which
+// resolves fine locally but not against the file layout Vercel's serverless
+// bundler produces, crashing the whole function before this module's own
+// try/catch can run (bare 500, empty body -- confirmed live in production).
+// require.resolve("pdf-parse") IS covered by the package's export map (its
+// main entry), so it survives Vercel's bundler; walking up from it to the
+// package root and back down to dist/worker/pdf.worker.mjs sidesteps both
+// the relative-path issue and the export-map restriction on that subpath
+// specifically (pdf-parse/dist/worker/... isn't itself exported).
+//
+// This has to run lazily, inside parseTallyInvoicePdf, NOT at module top
+// level -- Next.js executes top-level module code again during its build-time
+// "collect page data" step for every route, under Turbopack's own module
+// system rather than real Node.js. Under that system require.resolve()
+// returns Turbopack's internal numeric module id, not a filesystem path,
+// which crashed the production build outright ("path" argument must be of
+// type string, received type number). Deferring this until the function is
+// actually called keeps it inside a genuine Node.js request at runtime.
+let workerConfigured = false;
+function ensurePdfWorkerConfigured() {
+  if (workerConfigured) return;
+  const require = createRequire(import.meta.url);
+  const pdfParsePkgRoot = path.join(path.dirname(require.resolve("pdf-parse")), "..", "..", "..");
+  PDFParse.setWorker(pathToFileURL(path.join(pdfParsePkgRoot, "dist", "worker", "pdf.worker.mjs")).href);
+  workerConfigured = true;
+}
 
 // Ported from a Python/pdfplumber prototype and re-validated against this
 // library's very different text layout (tab-delimited columns in a
@@ -174,6 +205,7 @@ function parsePage(text: string): ParsedInvoice | null {
 }
 
 export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResult> {
+  ensurePdfWorkerConfigured();
   const parser = new PDFParse({ data: buffer });
   let text: { pages: { text: string }[] };
   try {

@@ -34,6 +34,20 @@ const nextConfig: NextConfig = {
   // lookup can't find ("Setting up fake worker failed") -- excluding it
   // keeps it as a native Node require, resolving from node_modules as-is.
   serverExternalPackages: ["pdf-parse"],
+  // serverExternalPackages keeps pdf-parse un-bundled, but Vercel's own
+  // file tracer still decides which files actually ship with the deployed
+  // function -- it doesn't reliably follow pdf-parse's `new Worker(...)`
+  // call to pdf-parse/dist/worker/pdf.worker.mjs, since that path is
+  // resolved at runtime rather than via a statically-analyzable import.
+  // Without the worker file present, spawning it throws inside pdf.js's
+  // worker bootstrap in a way that crashes the whole function before this
+  // route's own try/catch ever runs -- the client sees a bare 500 with no
+  // body ("Unexpected end of JSON input") instead of a real error message.
+  // Confirmed live: this exact upload crashed in production with
+  // content-length: 0 before this fix.
+  outputFileTracingIncludes: {
+    "/api/tally/parse": ["./node_modules/pdf-parse/dist/**/*"],
+  },
   // Without this, Turbopack walks up from the project looking for a
   // lockfile and can land on an unrelated one higher in the user's home
   // directory, which then makes it guess the wrong workspace root.

@@ -1,22 +1,29 @@
 import "server-only";
-import { createRequire } from "node:module";
-import path from "node:path";
-import { pathToFileURL } from "node:url";
-import type { PDFParse as PDFParseClass } from "pdf-parse";
 
-// The real, confirmed-live root cause of the production crash: pdfjs-dist
-// (used internally by pdf-parse) references the browser-native DOMMatrix
-// class at MODULE scope, not inside a function -- so merely importing
-// pdf-parse throws in any environment that doesn't define DOMMatrix as a
-// global, which Vercel's Node.js function runtime doesn't. Confirmed via
-// Vercel's own runtime logs: "Failed to load external module pdf-parse:
-// ReferenceError: DOMMatrix is not defined", crashing in ~8ms -- before any
-// of this file's own code, including the worker setup below, ever runs.
+// The real, confirmed-live root cause of the original production crash:
+// pdfjs-dist (used internally by pdf-parse) references the browser-native
+// DOMMatrix class at MODULE scope, not inside a function -- so merely
+// importing pdf-parse throws in any environment that doesn't define
+// DOMMatrix as a global, which Vercel's Node.js function runtime doesn't.
+// Confirmed via Vercel's own runtime logs: "Failed to load external module
+// pdf-parse: ReferenceError: DOMMatrix is not defined", crashing in ~8ms --
+// before any of this file's own code ever ran.
 //
 // A static top-level `import { PDFParse } from "pdf-parse"` is hoisted
 // ahead of everything else in this file, so there's no way to set the
 // polyfill first with one -- only a dynamic import, done after the
 // polyfill is in place, actually orders this correctly.
+//
+// (An earlier attempt also explicitly pinned pdf-parse's worker file via
+// PDFParse.setWorker(), computed through require.resolve("pdf-parse") --
+// that turned out to be solving a problem that didn't exist: every local
+// test worked fine without it, and worse, require.resolve() returns
+// Turbopack's internal numeric module id rather than a real filesystem path
+// in this app's deployed runtime, not just during Next's build step as
+// first assumed -- confirmed live, it crashed with "path argument must be
+// of type string, received type number" the moment the DOMMatrix fix let
+// execution reach it. Removed entirely; pdf-parse's own default worker
+// resolution has worked in every test since.)
 let pdfParseModule: typeof import("pdf-parse") | null = null;
 async function loadPdfParse() {
   if (pdfParseModule) return pdfParseModule;
@@ -26,35 +33,6 @@ async function loadPdfParse() {
   }
   pdfParseModule = await import("pdf-parse");
   return pdfParseModule;
-}
-
-// PDFParse spawns a real Node worker_threads.Worker to do the actual
-// parsing, defaulting to the relative path "./pdf.worker.mjs". Never
-// actually confirmed necessary once the DOMMatrix crash above is fixed
-// (every local test has worked without it), but left in as a defensive
-// second layer in case Vercel's worker-path resolution differs from local
-// in some way not yet hit -- setting it explicitly to an absolute path
-// costs nothing if unneeded. require.resolve("pdf-parse") IS covered by the
-// package's export map (its main entry), so it survives Vercel's bundler;
-// walking up from it to the package root and back down to
-// dist/worker/pdf.worker.mjs sidesteps the export-map restriction on that
-// subpath directly (pdf-parse/dist/worker/... isn't itself exported).
-//
-// This has to run lazily too, NOT at module top level -- Next.js executes
-// top-level module code again during its build-time "collect page data"
-// step for every route, under Turbopack's own module system rather than
-// real Node.js. Under that system require.resolve() returns Turbopack's
-// internal numeric module id, not a filesystem path, which crashed the
-// production build outright ("path" argument must be of type string,
-// received type number). Deferring this until the function is actually
-// called keeps it inside a genuine Node.js request at runtime.
-let workerConfigured = false;
-function ensurePdfWorkerConfigured(PDFParse: typeof PDFParseClass) {
-  if (workerConfigured) return;
-  const require = createRequire(import.meta.url);
-  const pdfParsePkgRoot = path.join(path.dirname(require.resolve("pdf-parse")), "..", "..", "..");
-  PDFParse.setWorker(pathToFileURL(path.join(pdfParsePkgRoot, "dist", "worker", "pdf.worker.mjs")).href);
-  workerConfigured = true;
 }
 
 // Ported from a Python/pdfplumber prototype and re-validated against this
@@ -231,7 +209,6 @@ function parsePage(text: string): ParsedInvoice | null {
 
 export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResult> {
   const { PDFParse } = await loadPdfParse();
-  ensurePdfWorkerConfigured(PDFParse);
   const parser = new PDFParse({ data: buffer });
   let text: { pages: { text: string }[] };
   try {

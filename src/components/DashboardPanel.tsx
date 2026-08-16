@@ -24,6 +24,7 @@ interface TallyLineRow {
   qty: number;
   rate: number | null;
   account_id: string;
+  document_type: "invoice" | "credit_note" | "debit_note";
   accounts: { label: string } | null;
   skus: { name: string } | null;
   item_master: { name: string } | null;
@@ -58,6 +59,7 @@ interface RevenueEvent {
   revenue: number;
   invoiceKey: string;
   source: "Tally Invoice" | "Consignment" | "Saleable Order";
+  isInvoiceDocument: boolean;
 }
 
 interface AccountOption {
@@ -195,7 +197,9 @@ export function DashboardPanel() {
     const [{ data: tally }, { data: billed }, { data: saleable }, { data: accountRows }] = await Promise.all([
       supabase
         .from("tally_invoice_lines")
-        .select("invoice_no, invoice_date, qty, rate, account_id, accounts(label), skus(name), item_master(name)")
+        .select(
+          "invoice_no, invoice_date, qty, rate, account_id, document_type, accounts(label), skus(name), item_master(name)"
+        )
         .returns<TallyLineRow[]>(),
       supabase
         .from("billing_requests")
@@ -228,10 +232,15 @@ export function DashboardPanel() {
       accountId: r.account_id,
       account: r.accounts?.label ?? "—",
       sku: r.skus?.name ?? r.item_master?.name ?? "—",
-      qty: r.qty,
+      // Credit/debit note lines carry a placeholder qty of 1 (a ledger-line
+      // marker, not a real physical unit -- see parsePdf.ts), so Units
+      // Booked and Top SKUs must not count it. Revenue still uses the raw
+      // qty * signed rate below, so the adjustment nets in correctly.
+      qty: r.document_type === "invoice" ? r.qty : 0,
       revenue: r.qty * (r.rate ?? 0),
       invoiceKey: `tally:${r.invoice_no}`,
       source: "Tally Invoice" as const,
+      isInvoiceDocument: r.document_type === "invoice",
     }));
     const fromConsignment = (billedRows ?? []).map((r) => ({
       date: r.invoice_date ?? r.entry_date,
@@ -242,6 +251,7 @@ export function DashboardPanel() {
       revenue: r.amount ?? 0,
       invoiceKey: `consignment:${r.invoice_number ?? r.entry_date}`,
       source: "Consignment" as const,
+      isInvoiceDocument: true,
     }));
     const fromSaleable = (saleableRows ?? [])
       .filter((o) => o.invoice_date)
@@ -255,6 +265,7 @@ export function DashboardPanel() {
           revenue: l.qty * (l.net_price ?? 0),
           invoiceKey: `order:${o.invoice_number ?? o.id}`,
           source: "Saleable Order" as const,
+          isInvoiceDocument: true,
         }))
       );
     return [...fromTally, ...fromConsignment, ...fromSaleable];
@@ -315,7 +326,7 @@ export function DashboardPanel() {
   }, [filtered]);
 
   const stats = useMemo(() => {
-    const invoiceKeys = new Set(filtered.map((e) => e.invoiceKey));
+    const invoiceKeys = new Set(filtered.filter((e) => e.isInvoiceDocument).map((e) => e.invoiceKey));
     const totalRevenue = filtered.reduce((a, e) => a + e.revenue, 0);
     const totalQty = filtered.reduce((a, e) => a + e.qty, 0);
     return {

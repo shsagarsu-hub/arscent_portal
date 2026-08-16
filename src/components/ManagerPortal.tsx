@@ -97,9 +97,16 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // usage that's been billed (its own invoice number/date, not a Tally
       // import) and closed Saleable orders (invoiced directly on the order),
       // both keyed the same way by invoice_date.
+      // document_type = 'invoice' excludes credit/debit note rows -- their
+      // qty is a fixed 1 (a ledger-line placeholder, not a real physical
+      // unit; see parsePdf.ts), so counting them here would misrepresent
+      // units actually sold against the monthly commitment target. They
+      // still correctly affect revenue -- see Dashboard, which sums
+      // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
         .select("sku_id, qty")
+        .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<TallyLineRow[]>(),

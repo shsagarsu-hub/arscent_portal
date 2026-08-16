@@ -201,6 +201,8 @@ export type TallyInvoiceLine = {
   batch_number: string | null;
   expiry_date: string | null;
   imported_by: string | null;
+  document_type: "invoice" | "credit_note" | "debit_note";
+  related_invoice_no: string | null;
   created_at: string;
 };
 
@@ -712,6 +714,8 @@ export interface Database {
           batch_number?: string | null;
           expiry_date?: string | null;
           imported_by?: string | null;
+          document_type?: "invoice" | "credit_note" | "debit_note";
+          related_invoice_no?: string | null;
           created_at?: string;
         };
         Update: {
@@ -727,6 +731,8 @@ export interface Database {
           batch_number?: string | null;
           expiry_date?: string | null;
           imported_by?: string | null;
+          document_type?: "invoice" | "credit_note" | "debit_note";
+          related_invoice_no?: string | null;
           created_at?: string;
         };
         Relationships: [

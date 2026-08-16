@@ -42,6 +42,8 @@ async function loadPdfParse() {
 // line-item quantities against that invoice's own printed "Total N <unit>"
 // line, so this isn't a guess at the format, it's fitted to real output.
 
+export type TallyDocumentType = "invoice" | "credit_note" | "debit_note";
+
 export interface ParsedBatch {
   batchNumber: string;
   expiryDate: string | null;
@@ -56,6 +58,13 @@ export interface ParsedInvoiceLine {
   qty: number;
   rate: number;
   batches: ParsedBatch[];
+  documentType: TallyDocumentType;
+  // Only set for credit_note/debit_note -- the invoice number it adjusts,
+  // so the two stay linked for audit even though they're stored as separate
+  // tally_invoice_lines rows (each keeps its own invoice_no -- the note's
+  // own number, e.g. "AR/CR/26-27/25" -- so it doesn't collide with or
+  // overwrite the original invoice's lines on re-import).
+  relatedInvoiceNo: string | null;
 }
 
 export interface ParsedInvoice {
@@ -207,6 +216,74 @@ function parsePage(text: string): ParsedInvoice | null {
   return { invoiceNo, date, buyer, items, printedTotal };
 }
 
+export interface ParsedAdjustment {
+  noteNo: string;
+  date: string;
+  buyer: string | null;
+  relatedInvoiceNo: string | null;
+  // Ledger-level line items -- a credit/debit note doesn't itemize a
+  // specific product/quantity the way a sales invoice does (confirmed
+  // against a real one: "1 GST Sales-22  4,761.90  0 %  90213900" -- no
+  // per-unit rate, no quantity, "GST Sales-22" is the Tally ledger name it
+  // was booked under, not a product). Each entry here is one such ledger
+  // line's pre-GST amount.
+  particulars: { description: string; amount: number }[];
+}
+
+// Same "Sl  <text>  <tab>  <money>..." shape as an invoice's item table, but
+// without a product name to anchor on (ITEM_START_RE/QTY_RE don't apply --
+// there's no "ZEISS"/"Treatment" and no "<qty> <unit>" token on these
+// lines). Anchoring on a line-leading Sl No. instead is enough: every real
+// particulars line starts with one, and the GST/tax breakdown lines below
+// it ("CGST Output", "SGST Output", "Total") don't.
+const ADJUSTMENT_LINE_RE = /^(\d{1,2})\s+([^\t\n]+?)\s*\t\s*([\d,]+\.\d{2})/gm;
+
+/**
+ * Parses a Tally Credit Note or Debit Note page. Verified against a real
+ * credit note (a pure commercial/price adjustment, no goods returned); a
+ * debit note has never actually been seen, but Tally generates both from
+ * the same voucher family, so this is applied to both under the working
+ * assumption their layouts match -- flag it if a real debit note turns out
+ * to look different.
+ */
+function parseAdjustmentPage(text: string, noteLabel: "Credit Note" | "Debit Note"): ParsedAdjustment | null {
+  const noteMatch = text.match(new RegExp(`${noteLabel} No\\.\\s*\\n\\s*([^\\n]+)`));
+  if (!noteMatch) return null;
+  const noteNo = noteMatch[1].trim();
+
+  const dateMatch = text.match(/\bDated\s*\n\s*(\d{1,2}-\w{3}-\d{2})\b/);
+  const date = dateMatch ? toIsoDate(dateMatch[1]) : "";
+
+  const relatedMatch = text.match(/Original Invoice No\.\s*&\s*Date\.\s*\n\s*([A-Z]{2,4}\/\d{2}-\d{2}\/\d+)/);
+  const relatedInvoiceNo = relatedMatch ? relatedMatch[1] : null;
+
+  let buyer: string | null = null;
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].trim() === "Consignee (Ship to)") {
+      buyer = lines[i + 1]?.trim() ?? null;
+      break;
+    }
+  }
+
+  const startMarkerMatch = text.match(/No\.\s*Rate/);
+  if (!startMarkerMatch) return { noteNo, date, buyer, relatedInvoiceNo, particulars: [] };
+  const fullBody = text.slice(startMarkerMatch.index! + startMarkerMatch[0].length);
+  let endIdx = fullBody.length;
+  for (const marker of ["SGST Output", "CGST Output", "IGST Output"]) {
+    const i = fullBody.indexOf(marker);
+    if (i !== -1 && i < endIdx) endIdx = i;
+  }
+  const body = fullBody.slice(0, endIdx);
+
+  const particulars = [...body.matchAll(ADJUSTMENT_LINE_RE)].map((m) => ({
+    description: m[2].replace(/\s+/g, " ").trim(),
+    amount: parseFloat(m[3].replace(/,/g, "")),
+  }));
+
+  return { noteNo, date, buyer, relatedInvoiceNo, particulars };
+}
+
 export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResult> {
   const { PDFParse } = await loadPdfParse();
   const parser = new PDFParse({ data: buffer });
@@ -218,7 +295,26 @@ export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResu
   }
 
   const byInvoice = new Map<string, ParsedInvoice>();
+  const byAdjustment = new Map<string, { kind: TallyDocumentType; parsed: ParsedAdjustment }>();
   for (const page of text.pages) {
+    // Credit/debit notes are tried first -- both have their own distinct
+    // "<Note type> No." marker, so this only routes a page there when that
+    // marker is actually present, never mistakes a real invoice for one.
+    const credit = parseAdjustmentPage(page.text, "Credit Note");
+    const debit = credit ? null : parseAdjustmentPage(page.text, "Debit Note");
+    const adjustment = credit ?? debit;
+    if (adjustment) {
+      const kind: TallyDocumentType = credit ? "credit_note" : "debit_note";
+      const existing = byAdjustment.get(adjustment.noteNo);
+      if (!existing) {
+        byAdjustment.set(adjustment.noteNo, { kind, parsed: { ...adjustment, particulars: [...adjustment.particulars] } });
+      } else {
+        existing.parsed.particulars.push(...adjustment.particulars);
+        if (!existing.parsed.buyer && adjustment.buyer) existing.parsed.buyer = adjustment.buyer;
+      }
+      continue;
+    }
+
     const parsed = parsePage(page.text);
     if (!parsed) continue;
     const existing = byInvoice.get(parsed.invoiceNo);
@@ -233,6 +329,33 @@ export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResu
 
   const warnings: string[] = [];
   const lines: ParsedInvoiceLine[] = [];
+
+  for (const { kind, parsed } of byAdjustment.values()) {
+    if (parsed.particulars.length === 0) {
+      warnings.push(`${parsed.noteNo}: no adjustment lines found.`);
+      continue;
+    }
+    // A credit note reduces revenue (negative), a debit note adds to it
+    // (positive, same sign as a normal invoice) -- qty is fixed at 1 since
+    // there's no physical unit on a ledger-level adjustment line, so the
+    // signed rate alone carries the revenue impact when summed the same way
+    // as every other tally_invoice_lines row (qty * rate).
+    const sign = kind === "credit_note" ? -1 : 1;
+    for (const p of parsed.particulars) {
+      lines.push({
+        invoiceNo: parsed.noteNo,
+        date: parsed.date,
+        buyerRaw: parsed.buyer ?? "",
+        descriptionRaw: p.description,
+        qty: 1,
+        rate: sign * p.amount,
+        batches: [],
+        documentType: kind,
+        relatedInvoiceNo: parsed.relatedInvoiceNo,
+      });
+    }
+  }
+
   for (const inv of byInvoice.values()) {
     if (inv.items.length === 0) {
       warnings.push(`${inv.invoiceNo}: no line items found.`);
@@ -252,13 +375,17 @@ export async function parseTallyInvoicePdf(buffer: Buffer): Promise<ParsePdfResu
         descriptionRaw: item.description,
         qty: item.qty,
         rate: item.rate,
+        documentType: "invoice",
+        relatedInvoiceNo: null,
         batches: item.batches,
       });
     }
   }
 
-  if (byInvoice.size === 0) {
-    warnings.push("No invoices recognized in this PDF -- it may not be an Arscent Tally sales invoice export.");
+  if (byInvoice.size === 0 && byAdjustment.size === 0) {
+    warnings.push(
+      "No invoices, credit notes, or debit notes recognized in this PDF -- it may not be an Arscent Tally export."
+    );
   }
 
   return { lines, warnings };

@@ -29,6 +29,8 @@ interface ParsedBatch {
   qty: number;
 }
 
+type TallyDocumentType = "invoice" | "credit_note" | "debit_note";
+
 interface ReviewLine {
   key: string;
   invoiceNo: string;
@@ -47,7 +49,19 @@ interface ReviewLine {
   skuSource: "sku" | "item" | "";
   skuConfidence: "high" | "low" | "none";
   crossAccount: boolean;
+  documentType: TallyDocumentType;
+  // Only set for credit_note/debit_note -- which invoice it adjusts. A
+  // credit/debit note is a ledger-level amount, not a specific product, so
+  // unlike an invoice line it doesn't need a product match to be importable
+  // (see `importable` in handleConfirm) — the account is enough.
+  relatedInvoiceNo: string | null;
 }
+
+const DOCUMENT_TYPE_LABELS: Record<TallyDocumentType, string> = {
+  invoice: "Invoice",
+  credit_note: "Credit Note",
+  debit_note: "Debit Note",
+};
 
 function ConfidenceBadge({ level }: { level: "high" | "low" | "none" }) {
   if (level === "high") return <span className="badge badge-good">matched</span>;
@@ -219,6 +233,8 @@ interface RawLine {
   qty: number;
   rate: number;
   batches?: ParsedBatch[];
+  documentType: TallyDocumentType;
+  relatedInvoiceNo: string | null;
 }
 
 let batchCounter = 0;
@@ -265,6 +281,8 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         skuSource: skuMatch.skuId ? "sku" : "",
         skuConfidence: skuMatch.confidence,
         crossAccount: skuMatch.crossAccount,
+        documentType: l.documentType,
+        relatedInvoiceNo: l.relatedInvoiceNo,
       };
     });
   }
@@ -277,8 +295,13 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
   // already showing (via built-in guesses), enriching it in place.
   async function enrichWithCatalogMatches(built: ReviewLine[]) {
     const client = createClient();
+    // A credit/debit note's "description" is a Tally ledger name ("GST
+    // Sales-22"), not a product — searching the catalog for it would only
+    // return noise, and it isn't required for the line to be importable
+    // anyway (see `importable` in handleConfirm).
+    const invoiceOnly = built.filter((l) => l.documentType === "invoice");
     const results = await Promise.all(
-      built.map(async (l) => {
+      invoiceOnly.map(async (l) => {
         // Try the exact raw description first — some product families have
         // 1,000+ power/cylinder variants in the catalog, so a broad search
         // on just the stripped family name (e.g. "ZEISS AT TORBI 719M")
@@ -354,8 +377,10 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
 
   const stats = {
     total: lines.length,
-    needsReview: lines.filter((l) => l.accountConfidence !== "high" || l.skuConfidence !== "high").length,
-    unresolved: lines.filter((l) => !l.accountId || !l.skuId).length,
+    needsReview: lines.filter(
+      (l) => l.accountConfidence !== "high" || (l.documentType === "invoice" && l.skuConfidence !== "high")
+    ).length,
+    unresolved: lines.filter((l) => !l.accountId || (l.documentType === "invoice" && !l.skuId)).length,
   };
 
   async function handleConfirm() {
@@ -364,7 +389,10 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
     setImportWarning(null);
     setConfirmed(null);
 
-    const importable = lines.filter((l) => l.accountId && l.skuId);
+    // A credit/debit note is a ledger-level amount, not a product -- it
+    // doesn't need (and usually won't get) a product match to be
+    // importable, unlike an invoice line. Only the account is required.
+    const importable = lines.filter((l) => l.accountId && (l.documentType !== "invoice" || l.skuId));
     if (importable.length === 0) {
       setImporting(false);
       setConfirmed({ count: 0, total: lines.length, movementCount: 0 });
@@ -383,7 +411,7 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
       // initial auto-match, just fed a canonical name instead of noisy raw
       // invoice text, so it's far more reliable here.
       const itemId = l.skuSource === "item" ? l.skuId : null;
-      const committedSkuId = l.skuSource === "sku" ? l.skuId : matchSku(l.skuLabel, l.accountId, skus).skuId;
+      const committedSkuId = l.skuSource === "sku" ? l.skuId : l.skuLabel ? matchSku(l.skuLabel, l.accountId, skus).skuId : null;
       const firstBatch = l.batches[0];
       return {
         invoice_no: l.invoiceNo,
@@ -397,6 +425,8 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         batch_number: firstBatch?.batchNumber ?? null,
         expiry_date: firstBatch?.expiryDate ?? null,
         imported_by: user?.id ?? null,
+        document_type: l.documentType,
+        related_invoice_no: l.relatedInvoiceNo,
       };
     });
 
@@ -424,15 +454,23 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
       return;
     }
 
-    // Every line that resolved to a specific catalog item also becomes a
-    // "sale_out" inventory movement — Arscent invoiced the hospital, so it
-    // leaves warehouse stock. Lines matched only to a committed SKU (no
-    // specific catalog item) can't be attributed to one exact product, so
-    // they don't get a movement. Each batch line keeps its own qty (one
-    // movement per unit for lens items with per-unit batches, one movement
-    // for the whole line where the source only gave one batch for it all).
+    // Every invoice line that resolved to a specific catalog item also
+    // becomes a "sale_out" inventory movement — Arscent invoiced the
+    // hospital, so it leaves warehouse stock. Lines matched only to a
+    // committed SKU (no specific catalog item) can't be attributed to one
+    // exact product, so they don't get a movement. Each batch line keeps
+    // its own qty (one movement per unit for lens items with per-unit
+    // batches, one movement for the whole line where the source only gave
+    // one batch for it all).
+    //
+    // Credit/debit note lines NEVER get a movement, even if a manager tags
+    // one with a catalog item for reporting — confirmed against a real
+    // credit note: it was a pure price/revenue adjustment, no goods moved.
+    // A future note that DOES represent an actual return would need its own
+    // explicit handling, not this same-shape movement.
     const movementRows = (insertedRows ?? []).flatMap((inserted, i) => {
       const line = importable[i];
+      if (line.documentType !== "invoice") return [];
       if (!inserted.item_id) return [];
       const batches = line.batches.length > 0 ? line.batches : [{ batchNumber: null, expiryDate: null, qty: line.qty }];
       return batches.map((b) => ({
@@ -488,20 +526,25 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         column, purchases log warehouse stock with batch and expiry.
       </p>
 
-      <h2 className="mb-1 text-[15px] font-extrabold text-ink">Sales invoices (Tally PDF)</h2>
+      <h2 className="mb-1 text-[15px] font-extrabold text-ink">Sales invoices, credit &amp; debit notes (Tally PDF)</h2>
       <p className="mb-3 text-xs text-muted">
-        Upload a Tally sales-invoice PDF, review the matches below, then confirm. Confirming{" "}
-        <strong>does</strong> write the matched lines to the database and feeds Vs Committed&apos;s
-        Actual column. Re-confirming replaces that invoice&apos;s lines rather than duplicating them,
-        and the review table clears after a successful import so it&apos;s ready for the next PDF.
-        Confirmed lines and their inventory movements — including deleting one, which also removes
-        it from Vs Committed&apos;s Actual — live in Inventory&apos;s Recent Movements from here on.
+        Upload a Tally sales-invoice, credit note, or debit note PDF (detected automatically), review
+        the matches below, then confirm. Confirming <strong>does</strong> write the matched lines to
+        the database. An invoice feeds both Vs Committed&apos;s Actual column and Dashboard revenue;
+        a credit/debit note is a revenue adjustment only — it doesn&apos;t need a product match, isn&apos;t
+        counted in Vs Committed&apos;s units (it has no physical quantity), and creates no inventory
+        movement, but does net into Dashboard revenue against the invoice it references. Re-confirming
+        replaces that document&apos;s lines rather than duplicating them, and the review table clears
+        after a successful import so it&apos;s ready for the next PDF. Confirmed invoice lines and their
+        inventory movements — including deleting one, which also removes it from Vs Committed&apos;s
+        Actual — live in Inventory&apos;s Recent Movements from here on; credit/debit notes (no
+        movement to show) stay visible in the list just below.
       </p>
 
       <ImportedInvoicesList key={importedRefreshKey} />
 
       <div className="card mb-4">
-        <h3 className="mb-2 text-[13px] font-extrabold text-ink">Upload Tally invoice PDF</h3>
+        <h3 className="mb-2 text-[13px] font-extrabold text-ink">Upload Tally PDF</h3>
         <div className="flex gap-2">
           <input
             ref={fileInputRef}
@@ -525,7 +568,8 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         )}
         {!uploadError && uploadWarnings.length === 0 && (
           <p className="mt-2 text-xs text-muted">
-            Pick a PDF exported from Tally, then click Parse to load its lines below for review.
+            Pick an invoice, credit note, or debit note PDF exported from Tally, then click Parse to load its lines
+            below for review.
           </p>
         )}
       </div>
@@ -553,10 +597,12 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
           <table className="u-table">
             <thead>
               <tr>
+                <th>Type</th>
                 <th>Invoice</th>
                 <th>Date</th>
                 <th>Description (raw)</th>
                 <th>Qty</th>
+                <th>Amount (ex GST)</th>
                 <th>Batch</th>
                 <th>Expiry</th>
                 <th>Account</th>
@@ -566,10 +612,27 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
             <tbody>
               {lines.map((l) => (
                 <tr key={l.key}>
-                  <td className="whitespace-nowrap">{l.invoiceNo}</td>
+                  <td className="whitespace-nowrap">
+                    {l.documentType === "invoice" ? (
+                      <span className="badge badge-neutral">Invoice</span>
+                    ) : (
+                      <span className={l.documentType === "credit_note" ? "badge badge-bad" : "badge badge-watch"}>
+                        {DOCUMENT_TYPE_LABELS[l.documentType]}
+                      </span>
+                    )}
+                  </td>
+                  <td className="whitespace-nowrap">
+                    {l.invoiceNo}
+                    {l.relatedInvoiceNo && (
+                      <div className="text-[10px] font-normal text-muted">adj. {l.relatedInvoiceNo}</div>
+                    )}
+                  </td>
                   <td className="whitespace-nowrap">{l.date}</td>
                   <td className="max-w-[220px] text-[11.5px] text-muted">{l.descriptionRaw}</td>
                   <td>{l.qty}</td>
+                  <td className={`whitespace-nowrap ${l.rate < 0 ? "text-bad-fg" : ""}`}>
+                    {l.rate < 0 ? "−" : ""}₹{Math.abs(l.rate).toLocaleString("en-IN", { maximumFractionDigits: 2 })}
+                  </td>
                   <td className="whitespace-nowrap">
                     {l.batches.length === 0
                       ? "—"
@@ -620,7 +683,13 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
                           })
                         }
                       />
-                      <ConfidenceBadge level={l.skuId ? l.skuConfidence : "none"} />
+                      {l.documentType === "invoice" || l.skuId ? (
+                        <ConfidenceBadge level={l.skuId ? l.skuConfidence : "none"} />
+                      ) : (
+                        <span className="badge badge-neutral" title="Not a product line -- tagging one is optional, only for reporting rollup">
+                          optional
+                        </span>
+                      )}
                       {l.skuSource === "item" && (
                         <span className="badge badge-neutral" title="Real product, but not tracked against a monthly commitment">
                           catalog-only

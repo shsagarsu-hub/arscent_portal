@@ -4,12 +4,15 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "../AppShell";
 
+type TallyDocumentType = "invoice" | "credit_note" | "debit_note";
+
 interface TallyLineRow {
   invoice_no: string;
   invoice_date: string;
   qty: number;
   rate: number | null;
   accounts: { label: string } | null;
+  document_type: TallyDocumentType;
 }
 
 interface InvoiceSummary {
@@ -19,7 +22,14 @@ interface InvoiceSummary {
   lines: number;
   qty: number;
   revenue: number;
+  documentType: TallyDocumentType;
 }
+
+const DOCUMENT_TYPE_LABELS: Record<TallyDocumentType, string> = {
+  invoice: "Invoice",
+  credit_note: "Credit Note",
+  debit_note: "Debit Note",
+};
 
 /** One row per invoice number (not per line) -- purpose-built for the
  * question a reviewer actually has before uploading a new PDF: "have I
@@ -38,7 +48,7 @@ export function ImportedInvoicesList() {
   const load = useCallback(async () => {
     const { data } = await supabase
       .from("tally_invoice_lines")
-      .select("invoice_no, invoice_date, qty, rate, accounts(label)")
+      .select("invoice_no, invoice_date, qty, rate, accounts(label), document_type")
       .returns<TallyLineRow[]>();
     setRows(data ?? []);
   }, [supabase]);
@@ -68,6 +78,7 @@ export function ImportedInvoicesList() {
           lines: 1,
           qty: r.qty,
           revenue: lineRevenue,
+          documentType: r.document_type,
         });
       }
     });
@@ -123,6 +134,7 @@ export function ImportedInvoicesList() {
               <table className="u-table">
                 <thead>
                   <tr>
+                    <th>Type</th>
                     <th>Invoice #</th>
                     <th>Date</th>
                     <th>Account</th>
@@ -134,12 +146,23 @@ export function ImportedInvoicesList() {
                 <tbody>
                   {filtered.map((inv) => (
                     <tr key={inv.invoiceNo}>
+                      <td className="whitespace-nowrap">
+                        {inv.documentType === "invoice" ? (
+                          <span className="badge badge-neutral">Invoice</span>
+                        ) : (
+                          <span className={inv.documentType === "credit_note" ? "badge badge-bad" : "badge badge-watch"}>
+                            {DOCUMENT_TYPE_LABELS[inv.documentType]}
+                          </span>
+                        )}
+                      </td>
                       <td className="whitespace-nowrap font-semibold text-ink">{inv.invoiceNo}</td>
                       <td className="whitespace-nowrap">{new Date(inv.date).toLocaleDateString("en-IN")}</td>
                       <td className="whitespace-nowrap">{inv.account}</td>
                       <td>{inv.lines}</td>
                       <td>{inv.qty}</td>
-                      <td className="whitespace-nowrap">₹{inv.revenue.toLocaleString("en-IN", { maximumFractionDigits: 0 })}</td>
+                      <td className={`whitespace-nowrap ${inv.revenue < 0 ? "text-bad-fg" : ""}`}>
+                        {inv.revenue < 0 ? "−" : ""}₹{Math.abs(inv.revenue).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                      </td>
                     </tr>
                   ))}
                 </tbody>

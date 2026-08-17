@@ -6,12 +6,20 @@ import { todayISO } from "@/lib/dates";
 import type { OrderDetail } from "./OrderDetailModal";
 import type { MovementCategory } from "@/lib/supabase/database.types";
 
+interface BatchOption {
+  batch_number: string;
+  balance: number;
+  expiry_date: string | null;
+}
+
 interface LineState {
   itemMasterId: string;
   itemName: string;
   batchNumber: string;
   warehouseBalance: number | null;
   checkingBalance: boolean;
+  batchOptions: BatchOption[] | null;
+  loadingBatches: boolean;
 }
 
 /** Same ilike-search-against-item_master pattern used in Inventory and
@@ -118,7 +126,10 @@ export function OrderFulfillmentModal({
   const [refDate, setRefDate] = useState(todayISO());
   const [lines, setLines] = useState<Record<string, LineState>>(
     Object.fromEntries(
-      order.order_lines.map((l) => [l.id, { itemMasterId: "", itemName: "", batchNumber: "", warehouseBalance: null, checkingBalance: false }])
+      order.order_lines.map((l) => [
+        l.id,
+        { itemMasterId: "", itemName: "", batchNumber: "", warehouseBalance: null, checkingBalance: false, batchOptions: null, loadingBatches: false },
+      ])
     )
   );
   const [saving, setSaving] = useState(false);
@@ -131,11 +142,30 @@ export function OrderFulfillmentModal({
   }
 
   async function pickItem(lineId: string, itemMasterId: string, itemName: string) {
-    updateLine(lineId, { itemMasterId, itemName, warehouseBalance: null });
+    updateLine(lineId, { itemMasterId, itemName, warehouseBalance: null, batchNumber: "", batchOptions: null });
     if (!itemMasterId) return;
-    updateLine(lineId, { checkingBalance: true });
-    const { data } = await supabase.from("stock_balance").select("balance").eq("item_id", itemMasterId).maybeSingle();
-    updateLine(lineId, { warehouseBalance: data?.balance ?? 0, checkingBalance: false });
+    updateLine(lineId, { checkingBalance: true, loadingBatches: true });
+    const [{ data: balanceRow }, { data: batchRows }] = await Promise.all([
+      supabase.from("stock_balance").select("balance").eq("item_id", itemMasterId).maybeSingle(),
+      // Only batches actually in the warehouse right now, oldest expiry
+      // first -- picking here is what should decide which batch physically
+      // ships, not a manually-typed number that might not match what's on
+      // the shelf.
+      supabase
+        .from("stock_balance_by_batch")
+        .select("batch_number, balance, expiry_date")
+        .eq("item_id", itemMasterId)
+        .not("batch_number", "is", null)
+        .gt("balance", 0)
+        .order("expiry_date", { ascending: true, nullsFirst: false })
+        .returns<BatchOption[]>(),
+    ]);
+    updateLine(lineId, {
+      warehouseBalance: balanceRow?.balance ?? 0,
+      checkingBalance: false,
+      batchOptions: batchRows ?? [],
+      loadingBatches: false,
+    });
   }
 
   async function submit() {
@@ -228,12 +258,28 @@ export function OrderFulfillmentModal({
                     itemName={state.itemName}
                     onSelect={(id, name) => void pickItem(l.id, id, name)}
                   />
-                  <input
+                  <select
                     className="field-input !py-1 text-[12px]"
-                    placeholder="Batch number"
                     value={state.batchNumber}
                     onChange={(e) => updateLine(l.id, { batchNumber: e.target.value })}
-                  />
+                    disabled={!state.itemMasterId || state.loadingBatches}
+                  >
+                    <option value="">
+                      {!state.itemMasterId
+                        ? "Pick an item first"
+                        : state.loadingBatches
+                          ? "Loading batches…"
+                          : state.batchOptions && state.batchOptions.length === 0
+                            ? "No batches in warehouse stock"
+                            : "Select batch…"}
+                    </option>
+                    {(state.batchOptions ?? []).map((b) => (
+                      <option key={b.batch_number} value={b.batch_number}>
+                        {b.batch_number} — {b.balance} in stock
+                        {b.expiry_date ? ` · exp ${b.expiry_date}` : ""}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 {state.itemMasterId && (
                   <p className={`mt-1.5 text-[11px] font-semibold ${short ? "text-bad-fg" : "text-muted"}`}>

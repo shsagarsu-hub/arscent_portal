@@ -28,16 +28,19 @@ interface UsageRow {
   sku_id: string;
   location_id: string;
   qty: number;
+  entry_date: string;
 }
 
 interface TallyLineRow {
   sku_id: string | null;
   qty: number;
+  invoice_date: string;
 }
 
 interface BilledConsignmentRow {
   sku_id: string;
   qty: number;
+  invoice_date: string | null;
 }
 
 interface BillingLineRow {
@@ -46,6 +49,7 @@ interface BillingLineRow {
 }
 
 interface ClosedSaleableRow {
+  invoice_date: string | null;
   order_lines: { sku_id: string; qty: number }[];
 }
 
@@ -54,7 +58,7 @@ type OrderRow = OrderDetail;
 export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolean }) {
   const supabase = createClient();
 
-  const [month, setMonth] = useState(thisMonthISO());
+  const [months, setMonths] = useState<string[]>(() => [thisMonthISO()]);
   const [skus, setSkus] = useState<SkuRow[] | null>(null);
   const [usage, setUsage] = useState<UsageRow[] | null>(null);
   const [tallyLines, setTallyLines] = useState<TallyLineRow[] | null>(null);
@@ -69,7 +73,15 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   const [fulfilling, setFulfilling] = useState<{ order: OrderRow; mode: "dc" | "invoice" } | null>(null);
 
   const load = useCallback(async () => {
-    const { start, end } = monthBounds(month);
+    // months may be a non-contiguous set (e.g. Jun + Aug, skipping Jul), so
+    // the DB query widens to the full span across every selected month and
+    // the exact set is applied client-side below -- gte/lt alone can't
+    // express "any of these specific months" in one round trip.
+    const sortedMonths = months.slice().sort();
+    const start = monthBounds(sortedMonths[0]).start;
+    const end = monthBounds(sortedMonths[sortedMonths.length - 1]).end;
+    const monthSet = new Set(months);
+    const inSelectedMonths = (dateISO: string | null) => !!dateISO && monthSet.has(dateISO.slice(0, 7));
 
     const [
       { data: skuRows },
@@ -87,7 +99,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
         .returns<SkuRow[]>(),
       supabase
         .from("usage_log")
-        .select("account_id, sku_id, location_id, qty")
+        .select("account_id, sku_id, location_id, qty, entry_date")
         .gte("entry_date", start)
         .lt("entry_date", end)
         .returns<UsageRow[]>(),
@@ -105,21 +117,21 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
-        .select("sku_id, qty")
+        .select("sku_id, qty, invoice_date")
         .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<TallyLineRow[]>(),
       supabase
         .from("billing_requests")
-        .select("sku_id, qty")
+        .select("sku_id, qty, invoice_date")
         .eq("status", "billed")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<BilledConsignmentRow[]>(),
       supabase
         .from("orders")
-        .select("order_lines(sku_id, qty)")
+        .select("invoice_date, order_lines(sku_id, qty)")
         .eq("order_type", "saleable")
         .eq("status", "closed")
         .gte("invoice_date", start)
@@ -137,13 +149,13 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     ]);
 
     setSkus(skuRows ?? []);
-    setUsage(usageRows ?? []);
-    setTallyLines(tallyRows ?? []);
-    setBilledConsignment(billedRows ?? []);
-    setClosedSaleable(closedSaleableRows ?? []);
+    setUsage((usageRows ?? []).filter((u) => inSelectedMonths(u.entry_date)));
+    setTallyLines((tallyRows ?? []).filter((t) => inSelectedMonths(t.invoice_date)));
+    setBilledConsignment((billedRows ?? []).filter((b) => inSelectedMonths(b.invoice_date)));
+    setClosedSaleable((closedSaleableRows ?? []).filter((o) => inSelectedMonths(o.invoice_date)));
     setOrders(orderRows ?? []);
     setSentLineIds(new Set((billingLineRows ?? []).map((b) => b.order_line_id as string)));
-  }, [month, supabase]);
+  }, [months, supabase]);
 
   useEffect(() => {
     void (async () => {
@@ -275,8 +287,8 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
             <CommittedPanel
               skus={skus}
               actualBySku={actualBySku}
-              month={month}
-              setMonth={setMonth}
+              months={months}
+              setMonths={setMonths}
               savingKey={savingKey}
               updateCommitment={updateCommitment}
             />

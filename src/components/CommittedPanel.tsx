@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Empty } from "./AppShell";
+import { MonthMultiSelect } from "./MonthMultiSelect";
 
 interface SkuRow {
   id: string;
@@ -27,15 +28,15 @@ function diffCell(committed: number | null, actual: number) {
 export function CommittedPanel({
   skus,
   actualBySku,
-  month,
-  setMonth,
+  months,
+  setMonths,
   savingKey,
   updateCommitment,
 }: {
   skus: SkuRow[];
   actualBySku: Map<string, number>;
-  month: string;
-  setMonth: (m: string) => void;
+  months: string[];
+  setMonths: (m: string[]) => void;
   savingKey: string | null;
   updateCommitment: (skuId: string, value: string) => void;
 }) {
@@ -56,11 +57,13 @@ export function CommittedPanel({
       .sort((a, b) => a.label.localeCompare(b.label));
   }, [skus]);
 
-  // Only accounts whose commencement date has arrived as of the selected
-  // month — an account with no start date set is treated as always eligible.
+  // Only accounts whose commencement date had arrived by at least one of the
+  // selected months — an account with no start date set is treated as always
+  // eligible. (Per-account eligible-month count, used to scale the committed
+  // target for the actual selected range, is computed per-row below.)
   const accounts = useMemo(
-    () => allAccounts.filter((a) => !a.commitmentStart || month >= a.commitmentStart.slice(0, 7)),
-    [allAccounts, month]
+    () => allAccounts.filter((a) => !a.commitmentStart || months.some((m) => m >= a.commitmentStart!.slice(0, 7))),
+    [allAccounts, months]
   );
 
   const visibleAccounts = accountFilter ? accounts.filter((a) => a.id === accountFilter) : accounts;
@@ -75,11 +78,19 @@ export function CommittedPanel({
     });
   }
 
-  function accountSummary(accountId: string) {
+  // How many of the selected months actually count toward this account's
+  // target -- an account isn't on the hook for months before its commitment
+  // commenced, even if those months are in the selected set.
+  function eligibleMonthCount(commitmentStart: string | null) {
+    const eligible = commitmentStart ? months.filter((m) => m >= commitmentStart.slice(0, 7)) : months;
+    return eligible.length || 1; // accounts with 0 eligible months are already filtered out above
+  }
+
+  function accountSummary(accountId: string, monthCount: number) {
     const accountSkus = skus.filter((s) => s.account_id === accountId);
     const achievements = accountSkus
       .filter((s) => s.commitment_per_month)
-      .map((s) => (actualBySku.get(s.id) ?? 0) / (s.commitment_per_month as number));
+      .map((s) => (actualBySku.get(s.id) ?? 0) / ((s.commitment_per_month as number) * monthCount));
     // Raw 0-1 ratio, not a percentage number — achievementBadge() does its
     // own *100 for display (and its color thresholds assume a 0-1 scale),
     // same as the per-row call below. Pre-multiplying here double-counted
@@ -98,14 +109,11 @@ export function CommittedPanel({
       </p>
 
       <div className="mb-3.5 flex flex-wrap gap-3">
-        <div className="max-w-[200px]">
+        <div>
           <label className="field-label">Month</label>
-          <input
-            type="month"
-            className="field-input"
-            value={month}
-            onChange={(e) => setMonth(e.target.value)}
-          />
+          <div>
+            <MonthMultiSelect months={months} onChange={setMonths} />
+          </div>
         </div>
         <div className="max-w-[260px] flex-1">
           <label className="field-label">Filter by account</label>
@@ -137,7 +145,8 @@ export function CommittedPanel({
         <div className="space-y-2">
           {visibleAccounts.map((a) => {
             const isOpen = expanded.has(a.id) || accountFilter === a.id;
-            const summary = accountSummary(a.id);
+            const monthCount = eligibleMonthCount(a.commitmentStart);
+            const summary = accountSummary(a.id, monthCount);
             const accountSkus = skus.filter((s) => s.account_id === a.id);
             return (
               <div key={a.id} className="overflow-hidden rounded-[4px] border border-border">
@@ -159,16 +168,18 @@ export function CommittedPanel({
                       <thead>
                         <tr>
                           <th>Product</th>
-                          <th>Committed</th>
+                          <th>Committed / month</th>
+                          <th>Target{monthCount > 1 ? ` (× ${monthCount} months)` : ""}</th>
                           <th>Actual</th>
-                          <th>Committed − Actual</th>
+                          <th>Target − Actual</th>
                           <th>Achievement</th>
                         </tr>
                       </thead>
                       <tbody>
                         {accountSkus.map((s) => {
                           const actual = actualBySku.get(s.id) ?? 0;
-                          const pct = s.commitment_per_month ? actual / s.commitment_per_month : null;
+                          const target = s.commitment_per_month !== null ? s.commitment_per_month * monthCount : null;
+                          const pct = target ? actual / target : null;
                           return (
                             <tr key={s.id}>
                               <td>{s.name}</td>
@@ -186,8 +197,9 @@ export function CommittedPanel({
                                   }}
                                 />
                               </td>
+                              <td>{target ?? <span className="text-muted">—</span>}</td>
                               <td>{actual}</td>
-                              <td>{diffCell(s.commitment_per_month, actual)}</td>
+                              <td>{diffCell(target, actual)}</td>
                               <td>{achievementBadge(pct)}</td>
                             </tr>
                           );

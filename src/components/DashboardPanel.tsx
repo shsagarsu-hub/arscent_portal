@@ -16,6 +16,7 @@ import {
 } from "recharts";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
+import { MonthMultiSelect } from "./MonthMultiSelect";
 import { BoxIcon, ChartIcon, ClipboardIcon, ReceiptIcon } from "./icons";
 
 interface TallyLineRow {
@@ -85,12 +86,17 @@ const SOURCE_COLORS: Record<string, string> = {
   "Saleable Order": SALEABLE,
 };
 
-const PERIODS = [
-  { value: "3", label: "Last 3 months" },
-  { value: "6", label: "Last 6 months" },
-  { value: "12", label: "Last 12 months" },
-  { value: "all", label: "All time" },
-];
+/** Last `n` months including the current one, ascending, as YYYY-MM strings
+ * -- the default selection, standing in for the old "Last 12 months" preset. */
+function lastNMonths(n: number) {
+  const now = new Date();
+  const out: string[] = [];
+  for (let i = n - 1; i >= 0; i--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    out.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+  }
+  return out;
+}
 
 const TOOLTIP_STYLE = {
   fontSize: 12,
@@ -190,7 +196,7 @@ export function DashboardPanel() {
   const [billedRows, setBilledRows] = useState<BilledConsignmentRow[] | null>(null);
   const [saleableRows, setSaleableRows] = useState<ClosedSaleableRow[] | null>(null);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
-  const [period, setPeriod] = useState("12");
+  const [months, setMonths] = useState<string[]>(() => lastNMonths(12));
   const [accountFilter, setAccountFilter] = useState("");
 
   const load = useCallback(async () => {
@@ -272,17 +278,13 @@ export function DashboardPanel() {
   }, [tallyRows, billedRows, saleableRows]);
 
   const filtered = useMemo(() => {
-    let cutoff: Date | null = null;
-    if (period !== "all") {
-      cutoff = new Date();
-      cutoff.setMonth(cutoff.getMonth() - Number(period));
-    }
+    const monthSet = months.length > 0 ? new Set(months) : null; // empty selection = all time
     return events.filter((e) => {
       if (accountFilter && e.accountId !== accountFilter) return false;
-      if (cutoff && new Date(e.date) < cutoff) return false;
+      if (monthSet && !monthSet.has(monthKey(e.date))) return false;
       return true;
     });
-  }, [events, period, accountFilter]);
+  }, [events, months, accountFilter]);
 
   const revenueByMonth = useMemo(() => {
     const map = new Map<string, number>();
@@ -357,17 +359,7 @@ export function DashboardPanel() {
             </p>
           </div>
           <div className="flex gap-2">
-            <select
-              className="rounded-[6px] border-0 bg-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-white outline-none [color-scheme:dark]"
-              value={period}
-              onChange={(e) => setPeriod(e.target.value)}
-            >
-              {PERIODS.map((p) => (
-                <option key={p.value} value={p.value} className="text-ink">
-                  {p.label}
-                </option>
-              ))}
-            </select>
+            <MonthMultiSelect months={months} onChange={setMonths} dark allowAllTime />
             <select
               className="rounded-[6px] border-0 bg-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-white outline-none [color-scheme:dark]"
               value={accountFilter}

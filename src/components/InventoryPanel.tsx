@@ -237,6 +237,11 @@ export function InventoryPanel() {
   // visit, unlike the Log a movement form above them.
   const [recentMovementsOpen, setRecentMovementsOpen] = useState(false);
   const [warehouseStockOpen, setWarehouseStockOpen] = useState(false);
+  // Client-side filter over the already-loaded warehouse list -- with 5,000+
+  // catalog variants (every lens power is its own row), a single new
+  // purchase can be genuinely hard to spot in an alphabetical list with no
+  // way to jump to it.
+  const [warehouseFilter, setWarehouseFilter] = useState("");
 
   const loadMovements = useCallback(async () => {
     let query = supabase
@@ -923,6 +928,24 @@ export function InventoryPanel() {
         {warehouse.length === 0 ? (
           <Empty title="No items in stock" body="Log a Purchase In movement to start tracking stock." />
         ) : (
+          <>
+          <div className="mb-3 max-w-xs">
+            <label className="field-label">Filter by item name</label>
+            <input
+              className="field-input !py-1.5 text-[12px]"
+              placeholder="e.g. CT LUCIA"
+              value={warehouseFilter}
+              onChange={(e) => setWarehouseFilter(e.target.value)}
+            />
+          </div>
+          {(() => {
+            const filtered = warehouseFilter.trim()
+              ? warehouse.filter((w) => w.name.toLowerCase().includes(warehouseFilter.trim().toLowerCase()))
+              : warehouse;
+            if (filtered.length === 0) {
+              return <Empty title="No items match this filter" body="Try a shorter or different search term." />;
+            }
+            return (
           <div className="overflow-x-auto">
             <table className="u-table">
               <thead>
@@ -938,7 +961,7 @@ export function InventoryPanel() {
                 </tr>
               </thead>
               <tbody>
-                {warehouse.map((w) => {
+                {filtered.map((w) => {
                   const isOpen = expandedItemId === w.item_id;
                   return (
                     <Fragment key={w.item_id}>
@@ -1009,6 +1032,9 @@ export function InventoryPanel() {
               </tbody>
             </table>
           </div>
+            );
+          })()}
+          </>
         )}
         </div>
         )}

@@ -44,19 +44,25 @@ function parseEmails(raw: string): string[] {
 
 /** Same debounced ilike-against-item_master combobox as Inventory's "Log a
  * movement" form and the order fulfillment modal -- the catalog runs into
- * the thousands, so it's never loaded in full. */
+ * the thousands, so it's never loaded in full. Also carries Inventory's
+ * "no match -- add it" fallback: a PO can be the first time Arscent ever
+ * orders a given lens power, so the catalog genuinely won't have it yet. */
 function ItemPicker({
+  itemId,
   itemName,
   onSelect,
+  onCreate,
 }: {
   itemId: string;
   itemName: string;
   onSelect: (id: string, name: string) => void;
+  onCreate: (name: string) => Promise<void>;
 }) {
   const supabase = createClient();
   const [query, setQuery] = useState(itemName);
   const [suggestions, setSuggestions] = useState<ItemSuggestion[]>([]);
   const [open, setOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [prevItemName, setPrevItemName] = useState(itemName);
@@ -81,6 +87,13 @@ function ItemPicker({
     }, 250);
   }
 
+  async function handleCreate() {
+    setCreating(true);
+    await onCreate(query.trim());
+    setCreating(false);
+    setOpen(false);
+  }
+
   return (
     <div className="relative">
       <input
@@ -97,7 +110,9 @@ function ItemPicker({
             <button
               key={s.id}
               type="button"
-              className="block w-full px-3 py-2 text-left text-[12.5px] text-ink hover:bg-cream"
+              className={`block w-full px-3 py-2 text-left text-[12.5px] hover:bg-cream ${
+                s.id === itemId ? "bg-[#eaf1fd] font-semibold text-brand" : "text-ink"
+              }`}
               onMouseDown={() => {
                 onSelect(s.id, s.name);
                 setQuery(s.name);
@@ -107,7 +122,21 @@ function ItemPicker({
               {s.name}
             </button>
           ))}
-          {suggestions.length === 0 && <div className="px-3 py-2 text-[12.5px] text-muted">No match.</div>}
+          {suggestions.length === 0 && (
+            <div className="px-3 py-2 text-[12.5px] text-muted">
+              No match.{" "}
+              {query.trim().length >= 2 && (
+                <button
+                  type="button"
+                  className="font-bold text-brand hover:underline"
+                  onMouseDown={handleCreate}
+                  disabled={creating}
+                >
+                  {creating ? "Adding…" : `+ Add "${query.trim()}" as a new item`}
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -122,8 +151,11 @@ interface PurchaseMovementRow {
   item_master: { name: string } | null;
 }
 
+// \S+ rather than a PO-specific pattern -- once typed in, this also has to
+// match Arscent's real numbering (e.g. "AR/IOLs/26-27/17"), not just the
+// auto-generated fallback format.
 function poNumberFromNotes(notes: string | null): string {
-  const m = notes?.match(/^Zeiss PO (PO-\S+)/);
+  const m = notes?.match(/^Zeiss PO (\S+)/);
   return m ? m[1] : "—";
 }
 
@@ -131,6 +163,7 @@ export function PurchaseOrderPanel() {
   const supabase = createClient();
 
   const [lines, setLines] = useState<Line[]>([emptyLine()]);
+  const [poNumber, setPoNumber] = useState("");
   const [to, setTo] = useState(DEFAULT_TO);
   const [cc, setCc] = useState(DEFAULT_CC);
   const [replyTo, setReplyTo] = useState(DEFAULT_REPLY_TO);
@@ -173,6 +206,18 @@ export function PurchaseOrderPanel() {
     setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.key !== key)));
   }
 
+  // Same inline-create pattern as Inventory's "Log a movement" -- a PO can
+  // legitimately be the first time Arscent orders a given lens power, so
+  // the catalog won't have it yet.
+  async function createItem(lineKey: string, name: string) {
+    if (!name) return;
+    const gtin = `MANUAL-${Date.now().toString(36).toUpperCase()}`;
+    const { data, error } = await supabase.from("item_master").insert({ name, gtin }).select("id").single();
+    if (!error && data) {
+      updateLine(lineKey, { itemId: data.id, itemName: name });
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const toList = parseEmails(to);
@@ -202,6 +247,7 @@ export function PurchaseOrderPanel() {
       delivery,
       payment,
       warranty,
+      poNumber: poNumber.trim() || undefined,
     });
     setSending(false);
 
@@ -214,6 +260,7 @@ export function PurchaseOrderPanel() {
       : `Inventory updated, but the email wasn't sent (${"reason" in res.email ? res.email.reason : res.email.error ?? "unknown reason"}).`;
     setStatus({ ok: true, text: `${res.poNumber} recorded — warehouse stock updated. ${emailNote}` });
     setLines([emptyLine()]);
+    setPoNumber("");
     setNotes(DEFAULT_NOTES);
     await loadRecent();
   }
@@ -229,12 +276,32 @@ export function PurchaseOrderPanel() {
           Purchase In movement in Inventory.
         </p>
         <form onSubmit={submit}>
+          <div className="mb-3 max-w-xs">
+            <label className="field-label">PO Number</label>
+            <input
+              className="field-input"
+              placeholder="e.g. AR/IOLs/26-27/17 — leave blank to auto-generate"
+              value={poNumber}
+              onChange={(e) => setPoNumber(e.target.value)}
+            />
+            {recent && recent.length > 0 && (
+              <p className="mt-1 text-[11px] text-muted">
+                Last sent: <span className="font-mono">{poNumberFromNotes(recent[0].notes)}</span> on{" "}
+                {new Date(recent[0].created_at).toLocaleDateString()}
+              </p>
+            )}
+          </div>
           <div className="mb-3 space-y-2">
             {lines.map((l, i) => (
               <div key={l.key} className="flex items-start gap-2">
                 <div className="min-w-[200px] flex-1">
                   {i === 0 && <label className="field-label">Product</label>}
-                  <ItemPicker itemId={l.itemId} itemName={l.itemName} onSelect={(id, name) => updateLine(l.key, { itemId: id, itemName: name })} />
+                  <ItemPicker
+                    itemId={l.itemId}
+                    itemName={l.itemName}
+                    onSelect={(id, name) => updateLine(l.key, { itemId: id, itemName: name })}
+                    onCreate={(name) => createItem(l.key, name)}
+                  />
                 </div>
                 <div className="w-[80px]">
                   {i === 0 && <label className="field-label">Qty</label>}

@@ -22,13 +22,15 @@ export interface SubmitPurchaseInput {
   delivery: string;
   payment: string;
   warranty: string;
+  poNumber?: string;
 }
 
 /**
- * PO number is derived purely from the current time + a random suffix --
- * same reasoning as workOrderNo, but there's no backing row to derive it
- * from here (a purchase is just a batch of stock_movements rows sharing one
- * notes tag, not a dedicated table), so it has to be generated up front.
+ * Falls back to a generated number only when the account manager leaves the
+ * PO Number field blank -- Arscent's real numbering (e.g.
+ * "AR/IOLs/26-27/17") is sequential and financial-year-scoped, which this
+ * can't replicate without a backing table, so typing the real one in is the
+ * normal path and this is just a safety net so the field is never required.
  */
 function newPoNumber(): string {
   const d = new Date();
@@ -65,7 +67,7 @@ export async function submitPurchaseOrder(input: SubmitPurchaseInput) {
   }
   if (input.to.length === 0) return { success: false as const, message: "Add at least one To recipient." };
 
-  const poNumber = newPoNumber();
+  const poNumber = input.poNumber?.trim() || newPoNumber();
   const createdAt = new Date().toISOString();
   const noteTag = `Zeiss PO ${poNumber}${input.notes.trim() ? ` — ${input.notes.trim()}` : ""}`;
 

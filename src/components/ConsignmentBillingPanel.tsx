@@ -324,7 +324,7 @@ export function ConsignmentBillingPanel() {
   return (
     <div className="space-y-4">
       <div className="card">
-        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+        <div className="mb-3.5 flex flex-wrap items-center justify-between gap-2">
           <h3 className="text-[14.5px] font-extrabold text-ink">Usage Log</h3>
           {selectedReadyCount > 0 && (
             <button
@@ -337,12 +337,6 @@ export function ConsignmentBillingPanel() {
             </button>
           )}
         </div>
-        <p className="mb-3.5 text-xs text-muted">
-          Usage hospitals have logged, plus LTC/STC orders sent here from the Orders tab. Click{" "}
-          <strong>Record</strong> once you&apos;ve confirmed it — that deducts it from that account&apos;s
-          consignment balance and moves it to Pending Invoice below. Rows from an order need the exact catalog
-          item + batch confirmed via Edit first.
-        </p>
         {billing === null ? (
           <Loading />
         ) : pending.length === 0 ? (
@@ -477,11 +471,7 @@ export function ConsignmentBillingPanel() {
       </div>
 
       <div className="card">
-        <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Pending Invoice</h3>
-        <p className="mb-3.5 text-xs text-muted">
-          Recorded consumption awaiting billing. Click a line to enter the invoice number and date once it&apos;s
-          been billed — it then drops off this list.
-        </p>
+        <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Pending Invoice</h3>
         {billing === null ? (
           <Loading />
         ) : requested.length === 0 ? (

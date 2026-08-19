@@ -313,8 +313,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           icon: <ClipboardIcon />,
           content: (
             <div className="card">
-              <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Orders received</h3>
-              <p className="mb-3.5 text-xs text-muted">Last 50 orders, across every account and type.</p>
+              <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Orders received</h3>
               {orders.length === 0 ? (
                 <Empty title="No orders yet" body="Orders submitted through the Order Portal will show up here." />
               ) : (

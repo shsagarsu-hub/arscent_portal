@@ -141,12 +141,12 @@ export function ImportedInvoicesList() {
     <div className="card mb-4">
       <button type="button" className="flex w-full items-center justify-between text-left" onClick={() => setOpen((o) => !o)}>
         <div>
-          <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Invoices imported to date</h3>
-          <p className="text-xs text-muted">
-            Check here before uploading a new PDF — {invoices.length} invoice{invoices.length === 1 ? "" : "s"} already
-            confirmed. Re-confirming the same invoice number replaces its lines rather than duplicating them, but
-            checking first saves the extra upload.
-          </p>
+          <h3 className="text-[14.5px] font-extrabold text-ink">
+            Invoices imported to date{" "}
+            <span className="font-normal text-muted">
+              ({invoices.length} confirmed)
+            </span>
+          </h3>
         </div>
         <span className="ml-3 shrink-0 text-lg text-muted">{open ? "−" : "+"}</span>
       </button>

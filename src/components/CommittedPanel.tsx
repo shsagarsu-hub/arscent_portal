@@ -103,10 +103,7 @@ export function CommittedPanel({
 
   return (
     <div className="card">
-      <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Actual vs committed</h3>
-      <p className="mb-3.5 text-xs text-muted">
-        Committed targets are editable and shared — change one here and everyone sees the update.
-      </p>
+      <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Actual vs committed</h3>
 
       <div className="mb-3.5 flex flex-wrap gap-3">
         <div>

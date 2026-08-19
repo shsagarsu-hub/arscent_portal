@@ -229,10 +229,6 @@ export function OrderForm({
         </Field>
       </div>
 
-      <div className="mb-4 rounded-[4px] bg-brand px-4 py-2.5 text-[12.5px] font-semibold text-white">
-        Add products in any of the two ways below.
-      </div>
-
       <div className="mb-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
         <div className="panel-dark">
           <svg className="mx-auto mb-2 h-8 w-8 text-white/70" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">

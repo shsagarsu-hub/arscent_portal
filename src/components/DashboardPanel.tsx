@@ -159,13 +159,11 @@ function StatCard({
 function ChartCard({
   eyebrow,
   title,
-  subtitle,
   height,
   children,
 }: {
   eyebrow: string;
   title: string;
-  subtitle: string;
   height?: number;
   children: React.ReactNode;
 }) {
@@ -174,7 +172,6 @@ function ChartCard({
       <div className="mb-3.5">
         <span className="text-[10px] font-extrabold uppercase tracking-wider text-brand">{eyebrow}</span>
         <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">{title}</h3>
-        <p className="text-xs text-muted">{subtitle}</p>
       </div>
       <div style={height ? { width: "100%", height } : undefined}>{children}</div>
     </div>
@@ -353,10 +350,6 @@ export function DashboardPanel() {
               Account Manager
             </span>
             <h3 className="mt-0.5 text-[17px] font-extrabold text-white">Dashboard &amp; Reports</h3>
-            <p className="mt-0.5 text-xs text-white/80">
-              Revenue booked and orders placed, from confirmed Tally invoices, billed consignment, and closed
-              Saleable orders — the same real data behind Vs Committed&apos;s Actual column.
-            </p>
           </div>
           <div className="flex gap-2">
             <MonthMultiSelect months={months} onChange={setMonths} dark allowAllTime />
@@ -388,7 +381,6 @@ export function DashboardPanel() {
       <ChartCard
         eyebrow="Trend"
         title="Revenue booked over time"
-        subtitle="Confirmed Tally invoices + billed consignment + closed Saleable orders, by month."
         height={280}
       >
         {revenueByMonth.length === 0 ? (
@@ -416,7 +408,6 @@ export function DashboardPanel() {
         <ChartCard
           eyebrow="Breakdown"
           title="Revenue by account"
-          subtitle="Booked revenue, by hospital account."
           height={260}
         >
           {revenueByAccount.length === 0 ? (
@@ -450,7 +441,6 @@ export function DashboardPanel() {
         <ChartCard
           eyebrow="Mix"
           title="Revenue by source"
-          subtitle="Direct Tally invoices vs. billed consignment usage vs. closed Saleable orders."
           height={260}
         >
           {revenueBySource.length === 0 ? (
@@ -485,7 +475,6 @@ export function DashboardPanel() {
       <ChartCard
         eyebrow="Products"
         title="Orders placed by SKU"
-        subtitle="Top 10 products by total quantity booked (Tally invoices + billed consignment + closed Saleable orders)."
         height={Math.max(260, topSkus.length * 34)}
       >
         {topSkus.length === 0 ? (

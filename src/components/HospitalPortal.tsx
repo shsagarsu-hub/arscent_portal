@@ -417,7 +417,7 @@ export function HospitalPortal({
             <div className="card">
               <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Log usage</h3>
               <p className="mb-3.5 text-xs text-muted">
-                Everything still on hand from consignment is listed below — edit the qty for whatever you actually used.
+                Enter the quantity actually used for each consigned product below.
               </p>
               <form onSubmit={submitLog}>
                 <div className="mb-3 flex flex-wrap gap-3">

@@ -225,8 +225,7 @@ export function OrderFulfillmentModal({
         <p className="mb-4 text-xs text-muted">
           {order.accounts?.label ?? "—"}
           {order.account_locations?.name ? ` (${order.account_locations.name})` : ""} · {order.order_lines.length} line
-          item(s). Confirm the exact catalog item + batch for each line before submitting — this is what actually
-          moves stock out of the warehouse{mode === "dc" ? " and into their consignment balance" : ""}.
+          item(s).
         </p>
 
         <div className="mb-4 grid grid-cols-2 gap-3">

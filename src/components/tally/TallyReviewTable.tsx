@@ -519,27 +519,9 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
           icon: <UploadIcon />,
           content: (
             <>
-      <h1 className="mb-1 text-xl font-extrabold text-ink">Import</h1>
-      <p className="mb-6 text-sm text-muted">
-        Bring in sales invoices from Tally (PDF) or warehouse purchases from a Tally Stock Group
-        Summary export (Excel) — both land as real records: invoices feed Vs Committed&apos;s Actual
-        column, purchases log warehouse stock with batch and expiry.
-      </p>
+      <h1 className="mb-6 text-xl font-extrabold text-ink">Import</h1>
 
-      <h2 className="mb-1 text-[15px] font-extrabold text-ink">Sales invoices, credit &amp; debit notes (Tally PDF)</h2>
-      <p className="mb-3 text-xs text-muted">
-        Upload a Tally sales-invoice, credit note, or debit note PDF (detected automatically), review
-        the matches below, then confirm. Confirming <strong>does</strong> write the matched lines to
-        the database. An invoice feeds both Vs Committed&apos;s Actual column and Dashboard revenue;
-        a credit/debit note is a revenue adjustment only — it doesn&apos;t need a product match, isn&apos;t
-        counted in Vs Committed&apos;s units (it has no physical quantity), and creates no inventory
-        movement, but does net into Dashboard revenue against the invoice it references. Re-confirming
-        replaces that document&apos;s lines rather than duplicating them, and the review table clears
-        after a successful import so it&apos;s ready for the next PDF. Confirmed invoice lines and their
-        inventory movements — including deleting one, which also removes it from Vs Committed&apos;s
-        Actual — live in Inventory&apos;s Recent Movements from here on; credit/debit notes (no
-        movement to show) stay visible in the list just below.
-      </p>
+      <h2 className="mb-3 text-[15px] font-extrabold text-ink">Sales invoices, credit &amp; debit notes (Tally PDF)</h2>
 
       <ImportedInvoicesList key={importedRefreshKey} />
 
@@ -565,12 +547,6 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
               <li key={i}>{w}</li>
             ))}
           </ul>
-        )}
-        {!uploadError && uploadWarnings.length === 0 && (
-          <p className="mt-2 text-xs text-muted">
-            Pick an invoice, credit note, or debit note PDF exported from Tally, then click Parse to load its lines
-            below for review.
-          </p>
         )}
       </div>
 
@@ -725,11 +701,7 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         {importError && <span className="text-xs font-semibold text-bad-fg">Import failed: {importError}</span>}
       </div>
 
-      <h2 className="mt-8 mb-1 text-[15px] font-extrabold text-ink">Purchases (Excel)</h2>
-      <p className="mb-3 text-xs text-muted">
-        Upload a Tally Stock Group Summary export to log warehouse purchase-in movements with
-        batch and expiry in bulk — see below, or in Inventory&apos;s Recent Movements once imported.
-      </p>
+      <h2 className="mt-8 mb-3 text-[15px] font-extrabold text-ink">Purchases (Excel)</h2>
       <PurchaseImportPanel />
             </>
           ),

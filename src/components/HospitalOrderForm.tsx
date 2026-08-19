@@ -255,8 +255,7 @@ export function HospitalOrderForm({
       <div className="card">
         <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Place an order</h3>
         <p className="mb-3.5 text-xs text-muted">
-          Choose consignment if you want stock sent now and billed only as it&apos;s used, or Purchase
-          for an outright sale.
+          Pick an order type, then fill in the shipment details below.
         </p>
 
         {locationId === null && (
@@ -351,8 +350,7 @@ export function HospitalOrderForm({
           <div>
             <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Products</h3>
             <p className="text-xs text-muted">
-              Search the exact official ZEISS SKU (with diopter/power already in the name), or fill in the
-              template and upload it.
+              Search by exact power/diopter, or use the upload template.
             </p>
           </div>
           <a

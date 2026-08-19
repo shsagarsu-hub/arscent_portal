@@ -114,12 +114,7 @@ export function PurchaseImportPanel() {
 
   return (
     <div className="card">
-      <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Purchases (Excel)</h3>
-      <p className="mb-3.5 text-xs text-muted">
-        Upload a Tally Stock Group Summary export (the &quot;Purchase Import&quot; format — an item
-        row followed by its batch rows) to log warehouse purchase-in movements with batch and
-        expiry in bulk, instead of one at a time in Inventory.
-      </p>
+      <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Purchases (Excel)</h3>
 
       <div className="mb-3 flex gap-2">
         <input

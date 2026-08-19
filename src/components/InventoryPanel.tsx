@@ -574,12 +574,7 @@ export function InventoryPanel() {
       )}
 
       <div className="card">
-        <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Log a movement</h3>
-        <p className="mb-3.5 text-xs text-muted">
-          Purchases into the warehouse, shipments to/from hospitals under consignment, sales, and
-          internal material moves. The item catalog is large (5,000+ lens power variants) — search
-          by typing part of the name.
-        </p>
+        <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Log a movement</h3>
         <form onSubmit={logMovement}>
           <div className="mb-3 flex flex-wrap gap-3">
             <div className="min-w-[220px] flex-1">
@@ -667,13 +662,9 @@ export function InventoryPanel() {
         >
           <div>
             <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Recent movements</h3>
-            <p className="text-xs text-muted">
-              {hasMovementFilter
-                ? "Filtered — showing every match, not just the latest 30."
-                : "Latest 30 logged movements."}{" "}
-              Edit to fix a mistake, or delete — either way the warehouse balance below recomputes
-              automatically, since it&apos;s derived from these entries live.
-            </p>
+            {hasMovementFilter && (
+              <p className="text-xs text-muted">Filtered — showing every match, not just the latest 30.</p>
+            )}
           </div>
           <span className="ml-3 shrink-0 text-lg text-muted">{recentMovementsOpen ? "−" : "+"}</span>
         </button>
@@ -916,10 +907,7 @@ export function InventoryPanel() {
           onClick={() => setWarehouseStockOpen((o) => !o)}
         >
           <div>
-            <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Warehouse stock</h3>
-            <p className="text-xs text-muted">
-              What Arscent holds, net of every movement — click a row for its batch/expiry breakdown.
-            </p>
+            <h3 className="text-[14.5px] font-extrabold text-ink">Warehouse stock</h3>
           </div>
           <span className="ml-3 shrink-0 text-lg text-muted">{warehouseStockOpen ? "−" : "+"}</span>
         </button>
@@ -1041,11 +1029,7 @@ export function InventoryPanel() {
       </div>
 
       <div className="card">
-        <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Consignment by hospital</h3>
-        <p className="mb-3.5 text-xs text-muted">
-          What&apos;s currently out with each hospital (sent minus returned minus consumed) — click a row for its
-          batch breakdown, the same batch numbers hospitals log usage against.
-        </p>
+        <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Consignment by hospital</h3>
         {consignment.length === 0 ? (
           <Empty title="Nothing out on consignment" body="Log a 'Sent to Hospital' movement to start tracking it." />
         ) : (

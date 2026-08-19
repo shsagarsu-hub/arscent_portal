@@ -118,16 +118,12 @@ export function MovementImportPanel({ onImported }: { onImported: () => void }) 
 
   return (
     <div className="mt-4 border-t border-border pt-4">
-      <div className="mb-1 flex items-center justify-between">
+      <div className="mb-3 flex items-center justify-between">
         <h4 className="text-[13px] font-extrabold text-ink">Bulk import from Excel</h4>
         <a href="/api/manager/movement-template" className="text-xs font-bold text-brand hover:underline">
           ⬇ Download Template
         </a>
       </div>
-      <p className="mb-3 text-xs text-muted">
-        Log many movements at once — item names must match the catalog exactly, as per Tally (see
-        the template&apos;s reference sheet for the exact spelling).
-      </p>
 
       <div className="mb-3 flex gap-2">
         <input

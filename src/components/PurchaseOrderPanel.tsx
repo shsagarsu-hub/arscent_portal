@@ -321,13 +321,7 @@ export function PurchaseOrderPanel() {
   return (
     <div className="space-y-4">
       <div className="card">
-        <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Place a purchase order with Zeiss</h3>
-        <p className="mb-3.5 text-xs text-muted">
-          For deliveries already committed to a hospital — pick each product, quantity and unit price,
-          then send. This emails Zeiss a PDF purchase order (same layout as Arscent&apos;s own PO
-          template) and immediately adds the quantity to warehouse stock, the same as logging a
-          Purchase In movement in Inventory.
-        </p>
+        <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Place a purchase order with Zeiss</h3>
         <form onSubmit={submit}>
           <div className="mb-3 max-w-xs">
             <label className="field-label">PO Number</label>
@@ -463,11 +457,7 @@ export function PurchaseOrderPanel() {
       <div className="card">
         <button type="button" className="flex w-full items-center justify-between text-left" onClick={() => setRecentOpen((o) => !o)}>
           <div>
-            <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Recent purchase orders</h3>
-            <p className="text-xs text-muted">
-              One row per PO — click to see its lines. Cancel reverses the whole PO, removing every line from Purchase In
-              and reducing warehouse stock accordingly.
-            </p>
+            <h3 className="text-[14.5px] font-extrabold text-ink">Recent purchase orders</h3>
           </div>
           <span className="ml-3 shrink-0 text-lg text-muted">{recentOpen ? "−" : "+"}</span>
         </button>

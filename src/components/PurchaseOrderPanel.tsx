@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { submitPurchaseOrder } from "@/app/manager/purchase/actions";
@@ -177,6 +177,9 @@ export function PurchaseOrderPanel() {
 
   const [recent, setRecent] = useState<PurchaseMovementRow[] | null>(null);
   const [recentOpen, setRecentOpen] = useState(false);
+  const [expandedPo, setExpandedPo] = useState<string | null>(null);
+  const [cancelingPo, setCancelingPo] = useState<string | null>(null);
+  const [cancelStatus, setCancelStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
   const loadRecent = useCallback(async () => {
     const { data } = await supabase
@@ -193,6 +196,56 @@ export function PurchaseOrderPanel() {
   useEffect(() => {
     void loadRecent();
   }, [loadRecent]);
+
+  // Every line of one PO shares the same notes prefix ("Zeiss PO
+  // <poNumber>...") -- there's no dedicated PO table, so that shared prefix
+  // is the only linkage between the individual stock_movements rows a
+  // multi-line PO produces. Grouped here so "Cancel PO" reverses the whole
+  // order in one action instead of one line at a time.
+  const poGroups = useMemo(() => {
+    if (!recent) return [];
+    const map = new Map<string, { poNumber: string; date: string; ids: string[]; totalQty: number; lines: PurchaseMovementRow[] }>();
+    recent.forEach((m) => {
+      const poNumber = poNumberFromNotes(m.notes);
+      const existing = map.get(poNumber);
+      if (existing) {
+        existing.ids.push(m.id);
+        existing.totalQty += m.qty;
+        existing.lines.push(m);
+        if (m.created_at > existing.date) existing.date = m.created_at;
+      } else {
+        map.set(poNumber, { poNumber, date: m.created_at, ids: [m.id], totalQty: m.qty, lines: [m] });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date));
+  }, [recent]);
+
+  /**
+   * Deletes every stock_movements row belonging to one PO -- warehouse
+   * stock recomputes live from what's left, so this is the exact reverse of
+   * sending the PO: the quantity comes back out of Purchase In / Balance.
+   * Same direct-delete pattern as Inventory's Recent Movements, just
+   * grouped by PO instead of picked row by row.
+   */
+  async function cancelPurchaseOrder(group: { poNumber: string; ids: string[]; totalQty: number; lines: PurchaseMovementRow[] }) {
+    if (
+      !confirm(
+        `Cancel PO ${group.poNumber}? This removes all ${group.lines.length} line${group.lines.length === 1 ? "" : "s"} (qty ${group.totalQty}) from Purchase In and reduces warehouse stock accordingly. This can't be undone.`
+      )
+    ) {
+      return;
+    }
+    setCancelingPo(group.poNumber);
+    setCancelStatus(null);
+    const { error } = await supabase.from("stock_movements").delete().in("id", group.ids);
+    setCancelingPo(null);
+    if (error) {
+      setCancelStatus({ ok: false, text: `Couldn't cancel ${group.poNumber}: ${error.message}` });
+      return;
+    }
+    setCancelStatus({ ok: true, text: `${group.poNumber} cancelled.` });
+    await loadRecent();
+  }
 
   function updateLine(key: string, patch: Partial<Line>) {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
@@ -411,15 +464,21 @@ export function PurchaseOrderPanel() {
         <button type="button" className="flex w-full items-center justify-between text-left" onClick={() => setRecentOpen((o) => !o)}>
           <div>
             <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Recent purchase orders</h3>
-            <p className="text-xs text-muted">Every line sent from this tab — also visible, with edit/delete, in Inventory&apos;s movement log.</p>
+            <p className="text-xs text-muted">
+              One row per PO — click to see its lines. Cancel reverses the whole PO, removing every line from Purchase In
+              and reducing warehouse stock accordingly.
+            </p>
           </div>
           <span className="ml-3 shrink-0 text-lg text-muted">{recentOpen ? "−" : "+"}</span>
         </button>
         {recentOpen && (
           <div className="mt-3.5">
+            {cancelStatus && (
+              <p className={`mb-2 text-xs font-semibold ${cancelStatus.ok ? "text-good-fg" : "text-bad-fg"}`}>{cancelStatus.text}</p>
+            )}
             {recent === null ? (
               <Loading />
-            ) : recent.length === 0 ? (
+            ) : poGroups.length === 0 ? (
               <Empty title="No purchase orders sent yet" body="POs sent above will show up here." />
             ) : (
               <div className="overflow-x-auto">
@@ -428,19 +487,65 @@ export function PurchaseOrderPanel() {
                     <tr>
                       <th>Date</th>
                       <th>PO Number</th>
-                      <th>Item</th>
-                      <th>Qty</th>
+                      <th>Lines</th>
+                      <th>Total Qty</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
-                    {recent.map((m) => (
-                      <tr key={m.id}>
-                        <td className="whitespace-nowrap">{new Date(m.created_at).toLocaleDateString()}</td>
-                        <td className="whitespace-nowrap font-mono text-[11.5px]">{poNumberFromNotes(m.notes)}</td>
-                        <td className="whitespace-nowrap">{m.item_master?.name ?? "—"}</td>
-                        <td>{m.qty}</td>
-                      </tr>
-                    ))}
+                    {poGroups.map((g) => {
+                      const isOpen = expandedPo === g.poNumber;
+                      return (
+                        <Fragment key={g.poNumber}>
+                          <tr className="cursor-pointer hover:bg-cream" onClick={() => setExpandedPo(isOpen ? null : g.poNumber)}>
+                            <td className="whitespace-nowrap">{new Date(g.date).toLocaleDateString()}</td>
+                            <td className="whitespace-nowrap font-mono text-[11.5px]">
+                              <span className="mr-1.5 text-muted">{isOpen ? "−" : "+"}</span>
+                              {g.poNumber}
+                            </td>
+                            <td>{g.lines.length}</td>
+                            <td>{g.totalQty}</td>
+                            <td className="whitespace-nowrap">
+                              <button
+                                type="button"
+                                className="btn-outline-danger !px-2.5 !py-1 text-[11px]"
+                                disabled={cancelingPo === g.poNumber}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  void cancelPurchaseOrder(g);
+                                }}
+                              >
+                                {cancelingPo === g.poNumber ? "Cancelling…" : "Cancel PO"}
+                              </button>
+                            </td>
+                          </tr>
+                          {isOpen && (
+                            <tr>
+                              <td colSpan={5} className="!p-0">
+                                <div className="bg-[#f7f9fd] px-4 py-3">
+                                  <table className="u-table">
+                                    <thead>
+                                      <tr>
+                                        <th>Item</th>
+                                        <th>Qty</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {g.lines.map((l) => (
+                                        <tr key={l.id}>
+                                          <td className="whitespace-nowrap">{l.item_master?.name ?? "—"}</td>
+                                          <td>{l.qty}</td>
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
+                        </Fragment>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

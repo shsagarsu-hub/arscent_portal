@@ -7,6 +7,7 @@ import { Empty, Loading } from "../AppShell";
 type TallyDocumentType = "invoice" | "credit_note" | "debit_note";
 
 interface TallyLineRow {
+  id: string;
   invoice_no: string;
   invoice_date: string;
   qty: number;
@@ -23,6 +24,7 @@ interface InvoiceSummary {
   qty: number;
   revenue: number;
   documentType: TallyDocumentType;
+  lineIds: string[];
 }
 
 const DOCUMENT_TYPE_LABELS: Record<TallyDocumentType, string> = {
@@ -44,11 +46,13 @@ export function ImportedInvoicesList() {
   // Stock -- this is a lookup you open right before an upload, not
   // something that needs to stay in view the rest of the time.
   const [open, setOpen] = useState(false);
+  const [cancelingInvoiceNo, setCancelingInvoiceNo] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
   const load = useCallback(async () => {
     const { data } = await supabase
       .from("tally_invoice_lines")
-      .select("invoice_no, invoice_date, qty, rate, accounts(label), document_type")
+      .select("id, invoice_no, invoice_date, qty, rate, accounts(label), document_type")
       .returns<TallyLineRow[]>();
     setRows(data ?? []);
   }, [supabase]);
@@ -69,6 +73,7 @@ export function ImportedInvoicesList() {
         existing.lines += 1;
         existing.qty += r.qty;
         existing.revenue += lineRevenue;
+        existing.lineIds.push(r.id);
         if (r.invoice_date > existing.date) existing.date = r.invoice_date;
       } else {
         map.set(r.invoice_no, {
@@ -79,11 +84,42 @@ export function ImportedInvoicesList() {
           qty: r.qty,
           revenue: lineRevenue,
           documentType: r.document_type,
+          lineIds: [r.id],
         });
       }
     });
     return Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date));
   }, [rows]);
+
+  /**
+   * Deletes every tally_invoice_lines row for this invoice number -- the
+   * FK's on-delete-cascade takes the dependent stock_movements rows down
+   * with it in the same call, reducing Sold and dropping it out of Vs
+   * Committed's Actual, exactly like deleting an invoice-sourced movement
+   * in Inventory's Recent Movements does today (see deleteMovement there).
+   * This is the invoice-level equivalent: one click for every line instead
+   * of deleting them one at a time.
+   */
+  async function cancelInvoice(inv: InvoiceSummary) {
+    const label = DOCUMENT_TYPE_LABELS[inv.documentType].toLowerCase();
+    if (
+      !confirm(
+        `Cancel ${label} ${inv.invoiceNo}? This removes all ${inv.lines} line${inv.lines === 1 ? "" : "s"} (qty ${inv.qty}) from Sold, drops it from Vs Committed's Actual and the Dashboard's Revenue Booked, and adjusts warehouse stock accordingly. This can't be undone.`
+      )
+    ) {
+      return;
+    }
+    setCancelingInvoiceNo(inv.invoiceNo);
+    setStatus(null);
+    const { error } = await supabase.from("tally_invoice_lines").delete().in("id", inv.lineIds);
+    setCancelingInvoiceNo(null);
+    if (error) {
+      setStatus({ ok: false, text: `Couldn't cancel ${inv.invoiceNo}: ${error.message}` });
+      return;
+    }
+    setStatus({ ok: true, text: `${inv.invoiceNo} cancelled.` });
+    await load();
+  }
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -116,13 +152,16 @@ export function ImportedInvoicesList() {
       </button>
       {open && (
         <div className="mt-3.5">
-          <div className="mb-3">
+          <div className="mb-3 flex items-center gap-3">
             <input
               className="field-input max-w-xs !py-1.5 text-[12px]"
               placeholder="Search invoice # or account…"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
             />
+            {status && (
+              <span className={`text-xs font-semibold ${status.ok ? "text-good-fg" : "text-bad-fg"}`}>{status.text}</span>
+            )}
           </div>
           {filtered.length === 0 ? (
             <Empty
@@ -141,6 +180,7 @@ export function ImportedInvoicesList() {
                     <th>Lines</th>
                     <th>Qty</th>
                     <th>Revenue (ex GST)</th>
+                    <th></th>
                   </tr>
                 </thead>
                 <tbody>
@@ -162,6 +202,16 @@ export function ImportedInvoicesList() {
                       <td>{inv.qty}</td>
                       <td className={`whitespace-nowrap ${inv.revenue < 0 ? "text-bad-fg" : ""}`}>
                         {inv.revenue < 0 ? "−" : ""}₹{Math.abs(inv.revenue).toLocaleString("en-IN", { maximumFractionDigits: 0 })}
+                      </td>
+                      <td className="whitespace-nowrap">
+                        <button
+                          type="button"
+                          className="btn-outline-danger !px-2.5 !py-1 text-[11px]"
+                          disabled={cancelingInvoiceNo === inv.invoiceNo}
+                          onClick={() => cancelInvoice(inv)}
+                        >
+                          {cancelingInvoiceNo === inv.invoiceNo ? "Cancelling…" : "Cancel"}
+                        </button>
                       </td>
                     </tr>
                   ))}

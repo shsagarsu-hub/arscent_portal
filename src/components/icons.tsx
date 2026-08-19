@@ -96,6 +96,17 @@ export function CartIcon() {
   );
 }
 
+export function TruckIcon() {
+  return (
+    <Svg>
+      <path d="M2.5 5.5h8.5v8H2.5v-8Z" strokeLinejoin="round" />
+      <path d="M11 8.5h3.2l2.3 2.7v2.3h-5.5v-5Z" strokeLinejoin="round" />
+      <circle cx="6" cy="15" r="1.5" />
+      <circle cx="14" cy="15" r="1.5" />
+    </Svg>
+  );
+}
+
 export function ReceiptIcon() {
   return (
     <Svg>

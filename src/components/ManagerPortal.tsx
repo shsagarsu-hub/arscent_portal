@@ -9,11 +9,12 @@ import { DashboardPanel } from "./DashboardPanel";
 import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
+import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
 import { monthBounds, thisMonthISO } from "@/lib/dates";
 import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { sendOrderToConsignment } from "@/app/manager/orders/actions";
-import { BoxIcon, BuildingIcon, ChartIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, UploadIcon } from "./icons";
+import { BoxIcon, BuildingIcon, ChartIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TruckIcon, UploadIcon } from "./icons";
 
 interface SkuRow {
   id: string;
@@ -299,6 +300,12 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           label: "Inventory",
           icon: <BoxIcon />,
           content: <InventoryPanel />,
+        },
+        {
+          id: "purchase",
+          label: "Purchase",
+          icon: <TruckIcon />,
+          content: <PurchaseOrderPanel />,
         },
         {
           id: "orders",

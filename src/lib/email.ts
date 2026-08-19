@@ -4,7 +4,7 @@ import { Resend } from "resend";
 // Resend's shared sandbox sender -- works with zero setup, but can only
 // deliver to the account's own verified email until a real domain is
 // verified. Swap via RESEND_FROM_EMAIL once a domain is set up.
-const FROM = process.env.RESEND_FROM_EMAIL || "Arscent Orders <onboarding@resend.dev>";
+const FROM = process.env.RESEND_FROM_EMAIL || "Arscent Orders <donotreply@resend.dev>";
 
 export interface OrderEmailLine {
   skuName: string;
@@ -128,6 +128,94 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
     return { sent: true, recipients };
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients };
+  }
+}
+
+export interface PurchaseOrderEmailInput {
+  poNumber: string;
+  notes: string | null;
+  to: string[];
+  cc: string[];
+  replyTo: string | null;
+  placedByName: string | null;
+  createdAt: string;
+  pdf: { filename: string; content: Buffer } | null;
+}
+
+/**
+ * Sends the Zeiss purchase-order email straight from the Purchase tab. Same
+ * no-op-without-a-key and sandbox-reroute behavior as sendOrderNotification
+ * above — see its docstring. Unlike that one, the caller (submitPurchaseOrder)
+ * has already written the inventory-affecting stock_movements rows by the
+ * time this runs, so a failed/unsent email here never rolls back the
+ * inventory increase; it only leaves the manager to re-send by hand.
+ */
+export async function sendPurchaseOrderEmail(input: PurchaseOrderEmailInput): Promise<SendResult> {
+  const apiKey = process.env.RESEND_API_KEY;
+  const intendedTo = input.to;
+  const intendedCc = input.cc;
+  const sandboxOverride = process.env.RESEND_SANDBOX_RECIPIENT;
+  const to = sandboxOverride ? [sandboxOverride] : intendedTo;
+  const cc = sandboxOverride ? [] : intendedCc;
+
+  if (!apiKey) {
+    console.warn(
+      `[email] RESEND_API_KEY not set -- skipped PO email for ${input.poNumber} (would have gone to: ${[...intendedTo, ...intendedCc].join(", ") || "nobody resolved"})`
+    );
+    return { sent: false, reason: "RESEND_API_KEY not configured", recipients: intendedTo };
+  }
+  if (to.length === 0) {
+    return { sent: false, reason: "no recipients", recipients: [] };
+  }
+
+  const resend = new Resend(apiKey);
+
+  const sandboxNote = sandboxOverride
+    ? `<p style="margin: 0 0 16px; padding: 8px 10px; background: #fef3e2; color: #d68910; font-size: 12px; border-radius: 4px;">
+         Sandbox routing active — this would normally have gone to: ${escapeHtml([...intendedTo, ...intendedCc].join(", ") || "nobody resolved")}.
+       </p>`
+    : "";
+
+  // Matches Arscent's own existing Zeiss PO emails verbatim (subject style
+  // "Arscent PO #.." and this exact "Dear Team / .. kindly do the needful /
+  // Regards, Lakshmikanth S / address / phone" body) -- the standing
+  // signature used for every PO regardless of which account manager is
+  // actually operating the portal, same reasoning as the PDF's scanned
+  // signature block. The line-item detail lives in the attached PDF, not
+  // the email body, because the real emails this replicates never listed
+  // items inline either.
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #172544; max-width: 560px;">
+      ${sandboxNote}
+      <p style="margin: 0 0 16px;">Dear Team,</p>
+      <p style="margin: 0 0 16px;">${input.notes ? escapeHtml(input.notes) : "Please find the attached PO &amp; Kindly do the needful."}</p>
+      <p style="margin: 24px 0 0;">Regards,</p>
+      <p style="margin: 16px 0 0;">Lakshmikanth S</p>
+      <p style="margin: 16px 0 0;">Arscent Health Services Pvt. Ltd.,</p>
+      <p style="margin: 8px 0 0;">No: 110, 2nd Cross, 4th Main,</p>
+      <p style="margin: 8px 0 0;">HAL 3rd Stage, Bangalore - 560075</p>
+      <p style="margin: 8px 0 0;">Ph:080-40950869 / 9035573666</p>
+      <p style="margin-top: 24px; color: #6b7c9e; font-size: 11px;">
+        PO ${escapeHtml(input.poNumber)} — placed via the Arscent Account Management Portal
+        ${input.placedByName ? `by ${escapeHtml(input.placedByName)} ` : ""}on ${new Date(input.createdAt).toLocaleString("en-IN")}.
+      </p>
+    </div>
+  `;
+
+  try {
+    const { error } = await resend.emails.send({
+      from: FROM,
+      to,
+      cc: cc.length > 0 ? cc : undefined,
+      replyTo: input.replyTo || undefined,
+      subject: `Arscent PO ${input.poNumber}`,
+      html,
+      attachments: input.pdf ? [{ filename: input.pdf.filename, content: input.pdf.content }] : undefined,
+    });
+    if (error) return { sent: false, error: error.message, recipients: to };
+    return { sent: true, recipients: [...to, ...cc] };
+  } catch (err) {
+    return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: to };
   }
 }
 

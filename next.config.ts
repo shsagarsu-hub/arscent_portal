@@ -33,7 +33,13 @@ const nextConfig: NextConfig = {
   // into the server chunk graph moves that file to a location the worker
   // lookup can't find ("Setting up fake worker failed") -- excluding it
   // keeps it as a native Node require, resolving from node_modules as-is.
-  serverExternalPackages: ["pdf-parse"],
+  // pdfkit's ESM entrypoint pulls in fontkit (custom-font embedding), which
+  // imports an @swc/helpers export Turbopack's bundled version doesn't
+  // provide ("applyDecoratedDescriptor doesn't exist") -- confirmed to break
+  // the build. Excluding it from bundling, same fix as pdf-parse above,
+  // resolves it as a plain Node require instead of going through Turbopack's
+  // transform.
+  serverExternalPackages: ["pdf-parse", "pdfkit"],
   // serverExternalPackages keeps pdf-parse un-bundled, but Vercel's own
   // file tracer still decides which files actually ship with the deployed
   // function, and it doesn't follow pdfjs-dist's (pdf-parse's own internal
@@ -44,8 +50,18 @@ const nextConfig: NextConfig = {
   // narrower version of this only included pdf-parse's own dist folder,
   // which doesn't contain pdfjs-dist at all (it's pdf-parse's dependency,
   // not pdf-parse itself), so the actual missing file was never covered.
+  // pdfkit (Purchase Order PDF attachment) reads its standard-14 font
+  // metrics via `fs.readFileSync(__dirname + '/data/*.afm')` at render time
+  // -- a statically-concatenated path nft usually traces fine, but this repo
+  // has already hit one nft miss on a sibling PDF library above, so this is
+  // cheap insurance rather than a confirmed-necessary fix. The submitting
+  // action isn't its own route (it's a "use server" action reached via
+  // whatever page calls it), so '/*' -- the pattern Next's own docs give for
+  // exactly this native/runtime-asset case -- covers it regardless of which
+  // page that ends up being.
   outputFileTracingIncludes: {
     "/api/tally/parse": ["./node_modules/pdf-parse/dist/**/*", "./node_modules/pdfjs-dist/legacy/**/*"],
+    "/*": ["./node_modules/pdfkit/js/data/**/*"],
   },
   // Without this, Turbopack walks up from the project looking for a
   // lockfile and can land on an unrelated one higher in the user's home

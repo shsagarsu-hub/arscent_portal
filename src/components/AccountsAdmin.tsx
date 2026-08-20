@@ -525,10 +525,10 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
 
   return (
     <tr>
-      <td>
+      <td className="min-w-[130px]">
         <input value={name} onChange={(e) => setName(e.target.value)} className="field-input" />
       </td>
-      <td>
+      <td className="min-w-[100px]">
         <input
           type="number"
           step="0.01"
@@ -537,7 +537,7 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[100px]">
         <input
           type="number"
           step="0.01"
@@ -547,7 +547,7 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[90px]">
         <input
           type="number"
           min="1"
@@ -558,7 +558,7 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[110px]">
         <input
           type="number"
           value={commitment}
@@ -566,7 +566,7 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[160px]">
         <div className="flex gap-1.5">
           <button className="btn-primary !px-3 !py-1.5 text-xs" disabled={saving || deleting} onClick={save}>
             {saving ? "Saving…" : "Save"}
@@ -624,7 +624,7 @@ function NewSkuRow({
 
   return (
     <tr>
-      <td>
+      <td className="min-w-[130px]">
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -632,7 +632,7 @@ function NewSkuRow({
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[100px]">
         <input
           type="number"
           step="0.01"
@@ -642,7 +642,7 @@ function NewSkuRow({
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[100px]">
         <input
           type="number"
           step="0.01"
@@ -652,7 +652,7 @@ function NewSkuRow({
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[90px]">
         <input
           type="number"
           min="1"
@@ -663,7 +663,7 @@ function NewSkuRow({
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[110px]">
         <input
           type="number"
           value={commitment}
@@ -672,7 +672,7 @@ function NewSkuRow({
           className="field-input"
         />
       </td>
-      <td>
+      <td className="min-w-[80px]">
         <button className="btn-primary" disabled={saving} onClick={add}>
           {saving ? "Saving…" : "Add"}
         </button>

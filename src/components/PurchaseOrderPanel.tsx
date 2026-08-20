@@ -385,9 +385,12 @@ export function PurchaseOrderPanel() {
           </div>
           <div className="mb-3 space-y-2">
             {lines.map((l, i) => (
-              <div key={l.key} className="flex items-start gap-2">
-                <div className="min-w-[200px] flex-1">
-                  {i === 0 && <label className="field-label">Product</label>}
+              <div
+                key={l.key}
+                className="flex flex-col gap-2 rounded-[6px] border border-border p-2.5 sm:flex-row sm:items-start sm:border-0 sm:p-0"
+              >
+                <div className="sm:min-w-[200px] sm:flex-1">
+                  <label className={`field-label ${i === 0 ? "" : "sm:hidden"}`}>Product</label>
                   <ItemPicker
                     itemId={l.itemId}
                     itemName={l.itemName}
@@ -395,39 +398,41 @@ export function PurchaseOrderPanel() {
                     onCreate={(name) => createItem(l.key, name)}
                   />
                 </div>
-                <div className="w-[80px]">
-                  {i === 0 && <label className="field-label">Qty</label>}
-                  <input
-                    type="number"
-                    min={1}
-                    className="field-input !py-1 text-[12.5px]"
-                    value={l.qty}
-                    onChange={(e) => updateLine(l.key, { qty: e.target.value })}
-                  />
-                </div>
-                <div className="w-[120px]">
-                  {i === 0 && <label className="field-label">Unit price (Rs.)</label>}
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    className="field-input !py-1 text-[12.5px]"
-                    placeholder="0.00"
-                    value={l.unitPrice}
-                    onChange={(e) => updateLine(l.key, { unitPrice: e.target.value })}
-                  />
-                </div>
-                <div className="w-[100px]">
-                  {i === 0 && <label className="field-label">HSN (optional)</label>}
-                  <input
-                    className="field-input !py-1 text-[12.5px]"
-                    value={l.hsn}
-                    onChange={(e) => updateLine(l.key, { hsn: e.target.value })}
-                  />
+                <div className="grid grid-cols-3 gap-2 sm:contents">
+                  <div className="sm:w-[80px]">
+                    <label className={`field-label ${i === 0 ? "" : "sm:hidden"}`}>Qty</label>
+                    <input
+                      type="number"
+                      min={1}
+                      className="field-input !py-1 text-[12.5px]"
+                      value={l.qty}
+                      onChange={(e) => updateLine(l.key, { qty: e.target.value })}
+                    />
+                  </div>
+                  <div className="sm:w-[120px]">
+                    <label className={`field-label ${i === 0 ? "" : "sm:hidden"}`}>Unit price (Rs.)</label>
+                    <input
+                      type="number"
+                      min={0}
+                      step="0.01"
+                      className="field-input !py-1 text-[12.5px]"
+                      placeholder="0.00"
+                      value={l.unitPrice}
+                      onChange={(e) => updateLine(l.key, { unitPrice: e.target.value })}
+                    />
+                  </div>
+                  <div className="sm:w-[100px]">
+                    <label className={`field-label ${i === 0 ? "" : "sm:hidden"}`}>HSN (optional)</label>
+                    <input
+                      className="field-input !py-1 text-[12.5px]"
+                      value={l.hsn}
+                      onChange={(e) => updateLine(l.key, { hsn: e.target.value })}
+                    />
+                  </div>
                 </div>
                 <button
                   type="button"
-                  className={`rounded-[4px] border border-border bg-card px-2.5 text-xs font-bold text-ink-soft ${i === 0 ? "mt-[22px]" : ""} py-1.5`}
+                  className={`self-end rounded-[4px] border border-border bg-card px-2.5 py-1.5 text-xs font-bold text-ink-soft sm:self-auto ${i === 0 ? "sm:mt-[22px]" : ""}`}
                   onClick={() => removeLine(l.key)}
                   disabled={lines.length === 1}
                 >

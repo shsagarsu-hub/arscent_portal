@@ -149,7 +149,7 @@ function StatCard({
         {icon}
       </div>
       <div className="min-w-0">
-        <div className="truncate text-[19px] font-extrabold leading-tight text-ink">{value}</div>
+        <div className="break-words text-[15px] font-extrabold leading-tight text-ink sm:text-[19px]">{value}</div>
         <div className="text-[9.5px] font-bold uppercase tracking-wide text-muted">{label}</div>
       </div>
     </div>

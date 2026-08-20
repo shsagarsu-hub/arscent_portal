@@ -26,7 +26,7 @@ export function StatBox({
       style={{ borderTop: `2px solid ${accentColor ?? "var(--color-accent)"}` }}
     >
       <div
-        className="bg-clip-text text-[19px] font-extrabold text-transparent"
+        className="truncate bg-clip-text text-[15px] font-extrabold text-transparent sm:text-[19px]"
         style={{
           backgroundImage: `linear-gradient(135deg, ${accentColor ?? "var(--color-accent)"}, var(--color-accent-2))`,
         }}

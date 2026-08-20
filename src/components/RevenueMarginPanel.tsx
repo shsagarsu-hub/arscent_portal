@@ -94,13 +94,21 @@ export function RevenueMarginPanel() {
       // revenue by ~19L that was never actually billed to it). Keying by the
       // invoice's own account_id, not the matched SKU's account_id, keeps a
       // bad match from crediting revenue to the wrong account.
+      // qty for COST only accumulates from revenue-bearing lines (revenue >
+      // 0) -- confirmed on real invoices (SMILE Pro / FLAP) that a $0-rate
+      // line is a duplicate stock-tracking entry for the SAME procedures
+      // already billed on a paired Licence line, not additional units. Where
+      // Tally records one billed line plus a $0 duplicate for the same
+      // procedures, counting both toward cost would overstate it by roughly
+      // 2x. Revenue itself is unaffected -- a $0 line already contributes
+      // nothing there.
       const qtyMap = new Map<string, number>();
       const revMap = new Map<string, number>();
       function add(accountId: string | null, skuId: string | null, dateIso: string | null, qty: number, revenue: number) {
         if (!accountId || !skuId || !inSelectedMonths(dateIso)) return;
         const key = `${accountId}|${skuId}`;
-        qtyMap.set(key, (qtyMap.get(key) ?? 0) + (qty || 0));
         revMap.set(key, (revMap.get(key) ?? 0) + (revenue || 0));
+        if (revenue > 0) qtyMap.set(key, (qtyMap.get(key) ?? 0) + (qty || 0));
       }
       (tallyRows ?? []).forEach((t) => add(t.account_id, t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
       (billedRows ?? []).forEach((b) => add(b.account_id, b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));

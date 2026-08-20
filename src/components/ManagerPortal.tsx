@@ -38,6 +38,7 @@ interface TallyLineRow {
   sku_id: string | null;
   account_id: string | null;
   qty: number;
+  rate: number | null;
   invoice_date: string;
 }
 
@@ -45,6 +46,7 @@ interface BilledConsignmentRow {
   sku_id: string;
   account_id: string | null;
   qty: number;
+  amount: number | null;
   invoice_date: string | null;
 }
 
@@ -56,7 +58,7 @@ interface BillingLineRow {
 interface ClosedSaleableRow {
   account_id: string | null;
   invoice_date: string | null;
-  order_lines: { sku_id: string; qty: number }[];
+  order_lines: { sku_id: string; qty: number; net_price: number | null }[];
 }
 
 type OrderRow = OrderDetail;
@@ -123,21 +125,21 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
-        .select("sku_id, account_id, qty, invoice_date")
+        .select("sku_id, account_id, qty, rate, invoice_date")
         .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<TallyLineRow[]>(),
       supabase
         .from("billing_requests")
-        .select("sku_id, account_id, qty, invoice_date")
+        .select("sku_id, account_id, qty, amount, invoice_date")
         .eq("status", "billed")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<BilledConsignmentRow[]>(),
       supabase
         .from("orders")
-        .select("account_id, invoice_date, order_lines(sku_id, qty)")
+        .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
         .eq("order_type", "saleable")
         .eq("status", "closed")
         .gte("invoice_date", start)
@@ -247,15 +249,20 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   // (see matching.ts), but this keeps a bad sku_id -- from a past import, a
   // manual override, or any future matching miss -- from crediting a
   // commitment target that account never actually sold against.
+  // Only counts qty from revenue-bearing lines (rate/amount/net_price > 0)
+  // -- confirmed on real invoices (SMILE Pro / FLAP) that a $0-rate line is
+  // a duplicate stock-tracking entry for the SAME procedures already billed
+  // on a paired Licence line, not additional units sold. Counting both
+  // toward achievement roughly doubled it for those two products.
   const actualBySku = new Map<string, number>();
-  function addActual(accountId: string | null, skuId: string | null, qty: number) {
-    if (!accountId || !skuId) return;
+  function addActual(accountId: string | null, skuId: string | null, qty: number, revenue: number) {
+    if (!accountId || !skuId || revenue <= 0) return;
     const key = `${accountId}|${skuId}`;
     actualBySku.set(key, (actualBySku.get(key) ?? 0) + (qty || 0));
   }
-  tallyLines.forEach((t) => addActual(t.account_id, t.sku_id, t.qty));
-  billedConsignment.forEach((b) => addActual(b.account_id, b.sku_id, b.qty));
-  closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty)));
+  tallyLines.forEach((t) => addActual(t.account_id, t.sku_id, t.qty, t.qty * (t.rate ?? 0)));
+  billedConsignment.forEach((b) => addActual(b.account_id, b.sku_id, b.qty, b.amount ?? 0));
+  closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
   const achievements = skus

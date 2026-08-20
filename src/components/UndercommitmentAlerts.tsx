@@ -61,44 +61,52 @@ export function UndercommitmentAlerts() {
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
-          .select("sku_id, account_id, qty, invoice_date")
+          .select("sku_id, account_id, qty, rate, invoice_date")
           .eq("document_type", "invoice")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string | null; account_id: string | null; qty: number; invoice_date: string }[]>(),
+          .returns<{ sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string }[]>(),
         supabase
           .from("billing_requests")
-          .select("sku_id, account_id, qty, invoice_date")
+          .select("sku_id, account_id, qty, amount, invoice_date")
           .eq("status", "billed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string; account_id: string | null; qty: number; invoice_date: string | null }[]>(),
+          .returns<{ sku_id: string; account_id: string | null; qty: number; amount: number | null; invoice_date: string | null }[]>(),
         supabase
           .from("orders")
-          .select("account_id, invoice_date, order_lines(sku_id, qty)")
+          .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
           .eq("order_type", "saleable")
           .eq("status", "closed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number }[] }[]>(),
+          .returns<
+            { account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]
+          >(),
       ]);
 
       // actual qty per (account, sku, month) -- keyed by account_id too, not
       // just sku_id, so a Tally description that fuzzy-matched a similarly
       // named SKU under a DIFFERENT account (a real occurrence -- see
       // matching.ts) can't credit that account's commitment achievement with
-      // units it never actually received.
+      // units it never actually received. Also only counts qty from
+      // revenue-bearing lines (revenue > 0) -- a $0-rate line is a duplicate
+      // stock-tracking entry for the SAME procedures already billed on a
+      // paired Licence line (confirmed on real SMILE Pro / FLAP invoices),
+      // not additional units.
       const actualByAccountSkuMonth = new Map<string, number>();
-      function addActual(accountId: string | null, skuId: string | null, dateIso: string | null, qty: number) {
-        if (!accountId || !skuId || !dateIso) return;
+      function addActual(accountId: string | null, skuId: string | null, dateIso: string | null, qty: number, revenue: number) {
+        if (!accountId || !skuId || !dateIso || revenue <= 0) return;
         const month = dateIso.slice(0, 7);
         if (!months.includes(month)) return;
         const key = `${accountId}|${skuId}|${month}`;
         actualByAccountSkuMonth.set(key, (actualByAccountSkuMonth.get(key) ?? 0) + (qty || 0));
       }
-      (tallyRows ?? []).forEach((t) => addActual(t.account_id, t.sku_id, t.invoice_date, t.qty));
-      (billedRows ?? []).forEach((b) => addActual(b.account_id, b.sku_id, b.invoice_date, b.qty));
-      (closedRows ?? []).forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, o.invoice_date, l.qty)));
+      (tallyRows ?? []).forEach((t) => addActual(t.account_id, t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
+      (billedRows ?? []).forEach((b) => addActual(b.account_id, b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));
+      (closedRows ?? []).forEach((o) =>
+        o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0)))
+      );
 
       const accounts = new Map<string, { label: string; commitmentStart: string | null }>();
       (skuRows ?? []).forEach((s) => {

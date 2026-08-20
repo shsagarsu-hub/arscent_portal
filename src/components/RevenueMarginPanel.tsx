@@ -26,7 +26,7 @@ function inrOrDash(n: number) {
   return n === 0 ? "–" : inr(n);
 }
 
-type SortKey = "name" | "actualRevenue" | "actualCost" | "actualMargin" | "committedRevenue" | "committedCost" | "committedMargin";
+type SortKey = "name" | "actualRevenue" | "actualCost" | "actualMarginPct" | "committedRevenue" | "committedCost" | "committedMarginPct";
 
 function SortHeader({
   label,
@@ -255,19 +255,25 @@ export function RevenueMarginPanel() {
       });
   });
   const productRows = Array.from(productFigures.entries())
-    .map(([name, fig]) => ({
-      name,
-      actualRevenue: fig.actualRevenue,
-      actualCost: fig.actualCost,
-      actualMargin: fig.actualRevenue - fig.actualCost,
-      committedRevenue: fig.committedRevenue,
-      committedCost: fig.committedCost,
-      committedMargin: fig.committedRevenue - fig.committedCost,
-    }))
+    .map(([name, fig]) => {
+      const actualMargin = fig.actualRevenue - fig.actualCost;
+      const committedMargin = fig.committedRevenue - fig.committedCost;
+      return {
+        name,
+        actualRevenue: fig.actualRevenue,
+        actualCost: fig.actualCost,
+        actualMarginPct: fig.actualRevenue !== 0 ? (actualMargin / fig.actualRevenue) * 100 : null,
+        committedRevenue: fig.committedRevenue,
+        committedCost: fig.committedCost,
+        committedMarginPct: fig.committedRevenue !== 0 ? (committedMargin / fig.committedRevenue) * 100 : null,
+      };
+    })
     .sort((a, b) => {
       const dir = sortDir === "asc" ? 1 : -1;
       if (sortKey === "name") return a.name.localeCompare(b.name) * dir;
-      return (a[sortKey] - b[sortKey]) * dir;
+      const av = a[sortKey] ?? -Infinity;
+      const bv = b[sortKey] ?? -Infinity;
+      return (av - bv) * dir;
     });
 
   if (skus === null) return <Loading />;
@@ -338,10 +344,10 @@ export function RevenueMarginPanel() {
                 <tr>
                   <SortHeader label="Revenue" sortKey="actualRevenue" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Cost" sortKey="actualCost" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Margin" sortKey="actualMargin" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Margin %" sortKey="actualMarginPct" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Revenue" sortKey="committedRevenue" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
                   <SortHeader label="Cost" sortKey="committedCost" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
-                  <SortHeader label="Margin" sortKey="committedMargin" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Margin %" sortKey="committedMarginPct" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
                 </tr>
               </thead>
               <tbody>
@@ -350,40 +356,38 @@ export function RevenueMarginPanel() {
                     <td className="text-muted">{row.name}</td>
                     <td className="text-right">{inrOrDash(row.actualRevenue)}</td>
                     <td className="text-right">{inrOrDash(row.actualCost)}</td>
-                    <td className={`text-right ${row.actualMargin < 0 ? "text-bad-fg" : ""}`}>{inrOrDash(row.actualMargin)}</td>
+                    <td className={`text-right ${row.actualMarginPct !== null && row.actualMarginPct < 0 ? "text-bad-fg" : ""}`}>
+                      {row.actualMarginPct !== null ? `${row.actualMarginPct.toFixed(1)}%` : "–"}
+                    </td>
                     <td className="text-right">{inrOrDash(row.committedRevenue)}</td>
                     <td className="text-right">{inrOrDash(row.committedCost)}</td>
-                    <td className={`text-right ${row.committedMargin < 0 ? "text-bad-fg" : ""}`}>{inrOrDash(row.committedMargin)}</td>
+                    <td className={`text-right ${row.committedMarginPct !== null && row.committedMarginPct < 0 ? "text-bad-fg" : ""}`}>
+                      {row.committedMarginPct !== null ? `${row.committedMarginPct.toFixed(1)}%` : "–"}
+                    </td>
                   </tr>
                 ))}
                 {(() => {
                   const totalActualCost = productRows.reduce((a, r) => a + r.actualCost, 0);
                   const totalCommittedCost = productRows.reduce((a, r) => a + r.committedCost, 0);
+                  const totalActualMarginPct = totals.actualRevenue !== 0 ? (totals.actualMargin / totals.actualRevenue) * 100 : null;
+                  const totalCommittedMarginPct =
+                    totals.committedRevenue !== 0 ? (totals.committedMargin / totals.committedRevenue) * 100 : null;
                   return (
                     <tr className="font-extrabold text-ink">
                       <td>Total</td>
                       <td className="text-right">{inr(totals.actualRevenue)}</td>
                       <td className="text-right">{inr(totalActualCost)}</td>
-                      <td className={`text-right ${totals.actualMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.actualMargin)}</td>
+                      <td className={`text-right ${totalActualMarginPct !== null && totalActualMarginPct < 0 ? "text-bad-fg" : ""}`}>
+                        {totalActualMarginPct !== null ? `${totalActualMarginPct.toFixed(1)}%` : "–"}
+                      </td>
                       <td className="text-right">{inr(totals.committedRevenue)}</td>
                       <td className="text-right">{inr(totalCommittedCost)}</td>
-                      <td className={`text-right ${totals.committedMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.committedMargin)}</td>
+                      <td className={`text-right ${totalCommittedMarginPct !== null && totalCommittedMarginPct < 0 ? "text-bad-fg" : ""}`}>
+                        {totalCommittedMarginPct !== null ? `${totalCommittedMarginPct.toFixed(1)}%` : "–"}
+                      </td>
                     </tr>
                   );
                 })()}
-                <tr className="italic text-muted">
-                  <td>Margin %</td>
-                  <td></td>
-                  <td></td>
-                  <td className="text-right">
-                    {totals.actualRevenue !== 0 ? `${((totals.actualMargin / totals.actualRevenue) * 100).toFixed(1)}%` : "–"}
-                  </td>
-                  <td></td>
-                  <td></td>
-                  <td className="text-right">
-                    {totals.committedRevenue !== 0 ? `${((totals.committedMargin / totals.committedRevenue) * 100).toFixed(1)}%` : "–"}
-                  </td>
-                </tr>
               </tbody>
             </table>
           </div>

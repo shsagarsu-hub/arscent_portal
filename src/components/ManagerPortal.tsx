@@ -10,11 +10,13 @@ import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
 import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
+import { UndercommitmentAlerts } from "./UndercommitmentAlerts";
+import { RevenueMarginPanel } from "./RevenueMarginPanel";
 import { monthBounds, thisMonthISO } from "@/lib/dates";
 import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { sendOrderToConsignment } from "@/app/manager/orders/actions";
-import { BoxIcon, BuildingIcon, ChartIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TruckIcon, UploadIcon } from "./icons";
+import { BoxIcon, BuildingIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TruckIcon, UploadIcon } from "./icons";
 
 interface SkuRow {
   id: string;
@@ -278,21 +280,20 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           id: "dashboard",
           label: "Dashboard",
           icon: <DashboardIcon />,
-          content: <DashboardPanel />,
-        },
-        {
-          id: "committed",
-          label: "Vs Committed",
-          icon: <ChartIcon />,
           content: (
-            <CommittedPanel
-              skus={skus}
-              actualBySku={actualBySku}
-              months={months}
-              setMonths={setMonths}
-              savingKey={savingKey}
-              updateCommitment={updateCommitment}
-            />
+            <div className="space-y-4">
+              <UndercommitmentAlerts />
+              <DashboardPanel />
+              <RevenueMarginPanel />
+              <CommittedPanel
+                skus={skus}
+                actualBySku={actualBySku}
+                months={months}
+                setMonths={setMonths}
+                savingKey={savingKey}
+                updateCommitment={updateCommitment}
+              />
+            </div>
           ),
         },
         {

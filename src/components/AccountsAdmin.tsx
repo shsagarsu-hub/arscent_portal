@@ -235,6 +235,7 @@ function AccountCard({
               <tr>
                 <th>Name</th>
                 <th>Price (ex GST)</th>
+                <th>Transfer price</th>
                 <th>Commitment / month</th>
                 <th></th>
               </tr>
@@ -248,7 +249,7 @@ function AccountCard({
               )}
               {skus.length === 0 && !showAddSku && (
                 <tr>
-                  <td colSpan={4} className="text-center text-xs text-muted">
+                  <td colSpan={5} className="text-center text-xs text-muted">
                     No SKUs yet.
                   </td>
                 </tr>
@@ -482,6 +483,7 @@ function LoginRow({ login }: { login: LoginProfile }) {
 function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
   const [name, setName] = useState(sku.name);
   const [price, setPrice] = useState(String(sku.price_ex_gst ?? ""));
+  const [transferPrice, setTransferPrice] = useState(String(sku.transfer_price ?? ""));
   const [commitment, setCommitment] = useState(String(sku.commitment_per_month ?? ""));
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -494,6 +496,7 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
       await upsertSku(accountId, sku.id, {
         name,
         price_ex_gst: price,
+        transfer_price: transferPrice,
         commitment_per_month: commitment,
       });
     } catch (err) {
@@ -534,6 +537,16 @@ function SkuRow({ accountId, sku }: { accountId: string; sku: Sku }) {
       <td>
         <input
           type="number"
+          step="0.01"
+          value={transferPrice}
+          onChange={(e) => setTransferPrice(e.target.value)}
+          placeholder="—"
+          className="field-input"
+        />
+      </td>
+      <td>
+        <input
+          type="number"
           value={commitment}
           onChange={(e) => setCommitment(e.target.value)}
           className="field-input"
@@ -562,11 +575,12 @@ function NewSkuRow({
   onAdd,
   onDone,
 }: {
-  onAdd: (data: { name: string; price_ex_gst: string; commitment_per_month: string }) => Promise<void>;
+  onAdd: (data: { name: string; price_ex_gst: string; transfer_price: string; commitment_per_month: string }) => Promise<void>;
   onDone: () => void;
 }) {
   const [name, setName] = useState("");
   const [price, setPrice] = useState("");
+  const [transferPrice, setTransferPrice] = useState("");
   const [commitment, setCommitment] = useState("");
   const [saving, setSaving] = useState(false);
 
@@ -574,7 +588,7 @@ function NewSkuRow({
     if (!name.trim()) return;
     setSaving(true);
     try {
-      await onAdd({ name, price_ex_gst: price, commitment_per_month: commitment });
+      await onAdd({ name, price_ex_gst: price, transfer_price: transferPrice, commitment_per_month: commitment });
       onDone();
     } finally {
       setSaving(false);
@@ -597,6 +611,16 @@ function NewSkuRow({
           step="0.01"
           value={price}
           onChange={(e) => setPrice(e.target.value)}
+          placeholder="—"
+          className="field-input"
+        />
+      </td>
+      <td>
+        <input
+          type="number"
+          step="0.01"
+          value={transferPrice}
+          onChange={(e) => setTransferPrice(e.target.value)}
           placeholder="—"
           className="field-input"
         />

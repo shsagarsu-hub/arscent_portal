@@ -120,14 +120,55 @@ function extractBatches(chunk: string): ParsedBatch[] {
   }));
 }
 
-// A new item starts on a line with a leading Sl No. (1-2 digits) followed --
-// possibly through an item code made of digits/dashes -- by the product
-// name. Every real product in these invoices starts with "ZEISS" (lens
-// products) or "Treatment" (SMILE Pro packs/licences). Matched against the
-// literal invoice number rather than a hand-tracked expected sequence,
-// since multi-page invoices continue their Sl No. across PDF pages (9, 10,
-// 11...) instead of resetting to 1 on each new page.
-const ITEM_START_RE = /(\d{1,2})\s+(?:[\d-]+\s*)?(ZEISS|Treatment|treatment)/g;
+// A new item starts on a line beginning with its own Sl No. (1-2 digits,
+// optionally followed by an item code made of digits/dashes) -- the literal
+// serial number Tally prints in the "Sl No." column. That column is
+// guaranteed present and sequential for every real item regardless of what
+// the product is named, which is what this anchors on instead of a
+// whitelist of known product-name words.
+//
+// A prior version matched only "ZEISS" or "Treatment" as the product-name
+// start -- safe for lens items and SMILE Pro packs/licences, but silently
+// dropped anything named differently. Confirmed on a real invoice
+// (AR/26-27/1497): "ICR Licence Pack of 10" and "Keratoplasty Licence Pack
+// of 10" matched neither word, so those two lines never matched at all and
+// vanished -- no error, no row in the review table, just gone. The only
+// thing that caught it was this parser's own qty-vs-printed-total check
+// ("parsed quantities sum to 15, but the invoice's printed total is 18"),
+// which flags that *something* is wrong without saying what. The next
+// unrelated new product name would have hit the exact same failure --
+// hence anchoring on the Sl No. column instead, which needs no maintenance
+// when Arscent's product list changes.
+//
+// Matched relative to the PREVIOUS accepted line's own number (n+1), not
+// counted from 1 -- multi-page invoices continue their Sl No. across PDF
+// pages (9, 10, 11...) instead of resetting, and each page is parsed
+// independently (see the per-page loop in parseTallyInvoicePdf below), so
+// page 2 of such an invoice legitimately starts this scan at 9, not 1.
+const LINE_ITEM_START_RE = /^[ \t]*(\d{1,2})[ \t]+(?:[\d-]+[ \t]*)?(\S.*)$/gm;
+
+function findItemChunks(body: string): string[] {
+  const candidates = [...body.matchAll(LINE_ITEM_START_RE)];
+  const starts: { index: number; nameStart: number }[] = [];
+  let lastNo: number | null = null;
+  for (const c of candidates) {
+    const n = parseInt(c[1], 10);
+    // The first candidate on this page is trusted as-is (it's whatever the
+    // page's own Sl No. sequence starts at); every one after it must be
+    // exactly one more than the last *accepted* number, so a stray digit
+    // elsewhere on a line (never possible at true line-start today, but a
+    // cheap safety net regardless) can't be mistaken for a new item.
+    if (lastNo !== null && n !== lastNo + 1) continue;
+    const nameStart = c.index! + c[0].length - c[2].length;
+    starts.push({ index: c.index!, nameStart });
+    lastNo = n;
+  }
+  return starts.map((s, i) => {
+    const chunkEnd = i + 1 < starts.length ? starts[i + 1].index : body.length;
+    return body.slice(s.nameStart, chunkEnd);
+  });
+}
+
 const UNIT_WORD = "(?:Nos|Pack|Kits|Bottles|Tests|Pcs|Vials|Box|Piece|Unit)";
 // Quantity is identified by "<n> <unit>" immediately followed by a tab and
 // a GST% -- the one column adjacency that holds regardless of whether the
@@ -169,14 +210,7 @@ function parsePage(text: string): ParsedInvoice | null {
   }
   const body = fullBody.slice(0, endIdx);
 
-  const starts = [...body.matchAll(ITEM_START_RE)];
-  const chunks: string[] = [];
-  for (let i = 0; i < starts.length; i++) {
-    const s = starts[i];
-    const nameStart = s.index! + s[0].length - s[2].length; // start of "ZEISS"/"Treatment"
-    const chunkEnd = i + 1 < starts.length ? starts[i + 1].index! : body.length;
-    chunks.push(body.slice(nameStart, chunkEnd));
-  }
+  const chunks = findItemChunks(body);
 
   const items: { description: string; qty: number; rate: number; batches: ParsedBatch[] }[] = [];
   for (const chunk of chunks) {

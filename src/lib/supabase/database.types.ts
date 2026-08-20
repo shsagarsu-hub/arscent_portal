@@ -58,6 +58,11 @@ export type Sku = {
   account_id: string;
   name: string;
   price_ex_gst: number | null;
+  // What Zeiss charges Arscent for this product -- the cost side of gross
+  // margin (price_ex_gst is the revenue side, what the hospital pays
+  // Arscent). Also used to prefill the Purchase tab's unit price, since
+  // that's the literal price a real PO to Zeiss would be raised at.
+  transfer_price: number | null;
   commitment_per_month: number | null;
   created_at: string;
   updated_at: string;
@@ -280,6 +285,7 @@ export interface Database {
           account_id: string;
           name: string;
           price_ex_gst?: number | null;
+          transfer_price?: number | null;
           commitment_per_month?: number | null;
           created_at?: string;
           updated_at?: string;
@@ -289,6 +295,7 @@ export interface Database {
           account_id?: string;
           name?: string;
           price_ex_gst?: number | null;
+          transfer_price?: number | null;
           commitment_per_month?: number | null;
           created_at?: string;
           updated_at?: string;

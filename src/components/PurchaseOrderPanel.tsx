@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { submitPurchaseOrder } from "@/app/manager/purchase/actions";
+import { stripPowerSpecs } from "@/lib/tally/matching";
 
 // Arscent's standing Zeiss PO contacts, editable per send -- every PO to
 // date has gone to this same distribution list (see the "Arscent PO #15 &
@@ -259,6 +260,30 @@ export function PurchaseOrderPanel() {
     setLines((prev) => (prev.length === 1 ? prev : prev.filter((l) => l.key !== key)));
   }
 
+  // item_master is the full lens-power-specific catalog ("CT LUCIA 621P
+  // TIP2.2 DPT 21.0"), while transfer_price -- what Zeiss actually charges
+  // Arscent -- lives on the smaller committed-family skus table ("CT
+  // LUCIA"), set in Accounts. Looking it up by the stripped family name
+  // rather than by id is what bridges the two catalogs. Never overwrites a
+  // price the AM already typed in for this line.
+  async function pickItem(lineKey: string, itemId: string, itemName: string) {
+    const currentLine = lines.find((l) => l.key === lineKey);
+    updateLine(lineKey, { itemId, itemName });
+    if (!itemId || (currentLine && currentLine.unitPrice.trim() !== "")) return;
+    const family = stripPowerSpecs(itemName).trim();
+    if (family.length < 3) return;
+    const { data } = await supabase
+      .from("skus")
+      .select("transfer_price")
+      .ilike("name", `%${family}%`)
+      .not("transfer_price", "is", null)
+      .limit(1)
+      .maybeSingle();
+    if (data?.transfer_price != null) {
+      updateLine(lineKey, { unitPrice: String(data.transfer_price) });
+    }
+  }
+
   // Same inline-create pattern as Inventory's "Log a movement" -- a PO can
   // legitimately be the first time Arscent orders a given lens power, so
   // the catalog won't have it yet.
@@ -346,7 +371,7 @@ export function PurchaseOrderPanel() {
                   <ItemPicker
                     itemId={l.itemId}
                     itemName={l.itemName}
-                    onSelect={(id, name) => updateLine(l.key, { itemId: id, itemName: name })}
+                    onSelect={(id, name) => void pickItem(l.key, id, name)}
                     onCreate={(name) => createItem(l.key, name)}
                   />
                 </div>

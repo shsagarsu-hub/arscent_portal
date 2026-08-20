@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter } from "next/font/google";
 import "./globals.css";
 
@@ -11,6 +11,25 @@ const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "sw
 export const metadata: Metadata = {
   title: "Arscent — Account Management Portal",
   description: "Usage logging, billing, and account management for Arscent hospital partners.",
+  manifest: "/manifest.webmanifest",
+  icons: {
+    icon: [
+      { url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512.png", sizes: "512x512", type: "image/png" },
+    ],
+    apple: "/icons/apple-touch-icon.png",
+  },
+  // Makes "Add to Home Screen" open as a standalone app on iOS -- Safari
+  // ignores the manifest's display:"standalone" and only respects this.
+  appleWebApp: {
+    capable: true,
+    statusBarStyle: "default",
+    title: "Arscent OM",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#2f5fc7",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

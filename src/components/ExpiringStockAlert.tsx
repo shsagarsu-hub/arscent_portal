@@ -78,7 +78,22 @@ export function ExpiringStockAlert() {
 
   if (batches === null) return <Loading />;
   const visible = batches.filter((b) => !dismissed.has(`${b.itemId}|${b.batchNumber}`));
-  if (visible.length === 0) return null;
+
+  // Shown even when nothing qualifies -- staying invisible when there's
+  // nothing to flag reads the same as "this feature isn't there at all",
+  // which is exactly what got reported. An explicit all-clear state proves
+  // the check actually ran.
+  if (visible.length === 0) {
+    return (
+      <div className="card border-good-fg bg-good-bg">
+        <h3 className="text-[14.5px] font-extrabold text-good-fg">✓ No stock expiring within {DAYS_THRESHOLD} days</h3>
+        <p className="mt-1 text-xs text-ink-soft">
+          Checked every batch still in Arscent&apos;s possession — warehouse or out on consignment. Nothing due within{" "}
+          {DAYS_THRESHOLD} days right now.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="card border-watch-fg bg-[#fef3e2]">

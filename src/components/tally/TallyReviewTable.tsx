@@ -342,12 +342,50 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
     );
   }
 
+  /**
+   * A credit/debit note's own printed buyer text is less reliable than an
+   * invoice's -- confirmed on a real note: its account fuzzy-matched to the
+   * wrong hospital even though the invoice it adjusts (relatedInvoiceNo) was
+   * correctly matched. A note should always carry the SAME account as the
+   * invoice it adjusts, so once that invoice's account is known -- from this
+   * same upload batch, or already sitting in the database from a prior
+   * import -- it overrides whatever buyerRaw guessed, at high confidence.
+   */
+  async function enrichCreditDebitNoteAccounts(built: ReviewLine[]) {
+    const notes = built.filter((l) => l.documentType !== "invoice" && l.relatedInvoiceNo);
+    if (notes.length === 0) return;
+
+    const client = createClient();
+    const missing = notes.filter((n) => !built.some((l) => l.invoiceNo === n.relatedInvoiceNo));
+    let dbAccountByInvoiceNo = new Map<string, string>();
+    if (missing.length > 0) {
+      const { data } = await client
+        .from("tally_invoice_lines")
+        .select("invoice_no, account_id")
+        .in(
+          "invoice_no",
+          Array.from(new Set(missing.map((n) => n.relatedInvoiceNo as string)))
+        );
+      dbAccountByInvoiceNo = new Map((data ?? []).map((r) => [r.invoice_no, r.account_id as string]));
+    }
+
+    setLines((prev) =>
+      prev.map((l) => {
+        if (l.documentType === "invoice" || !l.relatedInvoiceNo) return l;
+        const sibling = built.find((s) => s.invoiceNo === l.relatedInvoiceNo && s.accountId);
+        const resolvedAccountId = sibling?.accountId ?? dbAccountByInvoiceNo.get(l.relatedInvoiceNo);
+        if (!resolvedAccountId || resolvedAccountId === l.accountId) return l;
+        return { ...l, accountId: resolvedAccountId, accountConfidence: "high" as const };
+      })
+    );
+  }
+
   async function loadBatch(raw: RawLine[]) {
     const built = buildReviewLines(raw);
     setLines(built);
     setConfirmed(null);
     setImportError(null);
-    await enrichWithCatalogMatches(built);
+    await Promise.all([enrichWithCatalogMatches(built), enrichCreditDebitNoteAccounts(built)]);
   }
 
   async function handleParse() {

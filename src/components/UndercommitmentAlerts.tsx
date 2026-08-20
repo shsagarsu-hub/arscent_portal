@@ -7,6 +7,7 @@ import { monthBounds } from "@/lib/dates";
 interface SkuRow {
   id: string;
   commitment_per_month: number | null;
+  units_per_pack: number;
   account_id: string;
   accounts: { label: string; commitment_start: string | null } | null;
 }
@@ -57,7 +58,7 @@ export function UndercommitmentAlerts() {
       const [{ data: skuRows }, { data: tallyRows }, { data: billedRows }, { data: closedRows }] = await Promise.all([
         supabase
           .from("skus")
-          .select("id, commitment_per_month, account_id, accounts(label, commitment_start)")
+          .select("id, commitment_per_month, units_per_pack, account_id, accounts(label, commitment_start)")
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
@@ -131,7 +132,7 @@ export function UndercommitmentAlerts() {
             break;
           }
           const ratios = committedSkus.map((s) => {
-            const actual = actualByAccountSkuMonth.get(`${accountId}|${s.id}|${month}`) ?? 0;
+            const actual = (actualByAccountSkuMonth.get(`${accountId}|${s.id}|${month}`) ?? 0) * (s.units_per_pack || 1);
             return actual / (s.commitment_per_month as number);
           });
           const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length;

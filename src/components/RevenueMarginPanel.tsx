@@ -12,6 +12,7 @@ interface SkuRow {
   account_id: string;
   price_ex_gst: number | null;
   transfer_price: number | null;
+  units_per_pack: number;
   commitment_per_month: number | null;
   accounts: { label: string; commitment_start: string | null } | null;
 }
@@ -59,7 +60,7 @@ export function RevenueMarginPanel() {
       const [{ data: skuRows }, { data: tallyRows }, { data: billedRows }, { data: closedRows }] = await Promise.all([
         supabase
           .from("skus")
-          .select("id, name, account_id, price_ex_gst, transfer_price, commitment_per_month, accounts(label, commitment_start)")
+          .select("id, name, account_id, price_ex_gst, transfer_price, units_per_pack, commitment_per_month, accounts(label, commitment_start)")
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
@@ -157,7 +158,10 @@ export function RevenueMarginPanel() {
     let fig: Figures = { actualRevenue: 0, committedRevenue: 0, actualCost: 0, committedCost: 0 };
     accountSkus.forEach((s) => {
       const key = `${accountId}|${s.id}`;
-      const qty = actualQty.get(key) ?? 0;
+      // qty is in invoice-line units (e.g. "packs"); transfer_price and
+      // commitment_per_month are both quoted per single procedure/unit, so
+      // qty needs converting via units_per_pack before pricing it as cost.
+      const qty = (actualQty.get(key) ?? 0) * (s.units_per_pack || 1);
       fig.actualRevenue += actualRevenue.get(key) ?? 0;
       fig.actualCost += qty * (s.transfer_price ?? 0);
       if (s.commitment_per_month) {
@@ -201,7 +205,7 @@ export function RevenueMarginPanel() {
       .filter((s) => s.account_id === a.id)
       .forEach((s) => {
         const key = `${a.id}|${s.id}`;
-        const qty = actualQty.get(key) ?? 0;
+        const qty = (actualQty.get(key) ?? 0) * (s.units_per_pack || 1);
         const cur = productFigures.get(s.name) ?? { actualRevenue: 0, committedRevenue: 0, actualCost: 0, committedCost: 0 };
         cur.actualRevenue += actualRevenue.get(key) ?? 0;
         cur.actualCost += qty * (s.transfer_price ?? 0);

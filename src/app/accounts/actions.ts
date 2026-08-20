@@ -191,7 +191,13 @@ export async function deleteLogin(userId: string) {
 export async function upsertSku(
   accountId: string,
   skuId: string | null,
-  data: { name: string; price_ex_gst: string; transfer_price: string; commitment_per_month: string }
+  data: {
+    name: string;
+    price_ex_gst: string;
+    transfer_price: string;
+    units_per_pack: string;
+    commitment_per_month: string;
+  }
 ) {
   await requireManager();
   const admin = createAdminClient();
@@ -204,6 +210,7 @@ export async function upsertSku(
     name,
     price_ex_gst: data.price_ex_gst.trim() === "" ? null : parseFloat(data.price_ex_gst),
     transfer_price: data.transfer_price.trim() === "" ? null : parseFloat(data.transfer_price),
+    units_per_pack: data.units_per_pack.trim() === "" ? 1 : parseInt(data.units_per_pack, 10),
     commitment_per_month:
       data.commitment_per_month.trim() === "" ? null : parseInt(data.commitment_per_month, 10),
     updated_at: new Date().toISOString(),

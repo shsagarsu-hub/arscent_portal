@@ -22,6 +22,7 @@ interface SkuRow {
   id: string;
   name: string;
   commitment_per_month: number | null;
+  units_per_pack: number;
   account_id: string;
   accounts: { label: string; commitment_start: string | null } | null;
 }
@@ -102,7 +103,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     ] = await Promise.all([
       supabase
         .from("skus")
-        .select("id, name, commitment_per_month, account_id, accounts(label, commitment_start)")
+        .select("id, name, commitment_per_month, units_per_pack, account_id, accounts(label, commitment_start)")
         .order("name")
         .returns<SkuRow[]>(),
       supabase
@@ -265,9 +266,13 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
+  // actualBySku is in raw invoice-line units (e.g. "packs"); commitment_per_
+  // month is quoted per single procedure/unit, same granularity as
+  // price_ex_gst/transfer_price, so it needs the same units_per_pack
+  // conversion RevenueMarginPanel applies before comparing against target.
   const achievements = skus
     .filter((s) => s.commitment_per_month)
-    .map((s) => (actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) / (s.commitment_per_month as number));
+    .map((s) => ((actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1)) / (s.commitment_per_month as number));
   const avgAch = achievements.length
     ? Math.round((achievements.reduce((a, b) => a + b, 0) / achievements.length) * 100)
     : null;

@@ -63,6 +63,13 @@ export type Sku = {
   // Arscent). Also used to prefill the Purchase tab's unit price, since
   // that's the literal price a real PO to Zeiss would be raised at.
   transfer_price: number | null;
+  // How many billable procedures/units one invoice-line qty actually
+  // represents. Almost always 1 (qty=1 means one lens), but a "Pack of 10" /
+  // "(10 Procedure)" licence product (SMILE Pro, FLAP) sells in bundles --
+  // qty=1 on such a line is one bundle of 10, not one procedure -- and both
+  // price_ex_gst and transfer_price are quoted per single procedure, so
+  // revenue/cost/achievement all need qty * units_per_pack, not raw qty.
+  units_per_pack: number;
   commitment_per_month: number | null;
   created_at: string;
   updated_at: string;
@@ -286,6 +293,7 @@ export interface Database {
           name: string;
           price_ex_gst?: number | null;
           transfer_price?: number | null;
+          units_per_pack?: number;
           commitment_per_month?: number | null;
           created_at?: string;
           updated_at?: string;
@@ -296,6 +304,7 @@ export interface Database {
           name?: string;
           price_ex_gst?: number | null;
           transfer_price?: number | null;
+          units_per_pack?: number;
           commitment_per_month?: number | null;
           created_at?: string;
           updated_at?: string;

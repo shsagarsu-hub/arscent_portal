@@ -61,42 +61,44 @@ export function UndercommitmentAlerts() {
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
-          .select("sku_id, qty, invoice_date")
+          .select("sku_id, account_id, qty, invoice_date")
           .eq("document_type", "invoice")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string | null; qty: number; invoice_date: string }[]>(),
+          .returns<{ sku_id: string | null; account_id: string | null; qty: number; invoice_date: string }[]>(),
         supabase
           .from("billing_requests")
-          .select("sku_id, qty, invoice_date")
+          .select("sku_id, account_id, qty, invoice_date")
           .eq("status", "billed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string; qty: number; invoice_date: string | null }[]>(),
+          .returns<{ sku_id: string; account_id: string | null; qty: number; invoice_date: string | null }[]>(),
         supabase
           .from("orders")
-          .select("invoice_date, order_lines(sku_id, qty)")
+          .select("account_id, invoice_date, order_lines(sku_id, qty)")
           .eq("order_type", "saleable")
           .eq("status", "closed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ invoice_date: string | null; order_lines: { sku_id: string; qty: number }[] }[]>(),
+          .returns<{ account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number }[] }[]>(),
       ]);
 
-      // actual qty per (sku, month) -- unlike the Dashboard/Vs Committed
-      // load(), which sums a whole selected range into one number per SKU,
-      // the per-month check below needs each month's figure kept separate.
-      const actualBySkuMonth = new Map<string, number>();
-      function addActual(skuId: string | null, dateIso: string | null, qty: number) {
-        if (!skuId || !dateIso) return;
+      // actual qty per (account, sku, month) -- keyed by account_id too, not
+      // just sku_id, so a Tally description that fuzzy-matched a similarly
+      // named SKU under a DIFFERENT account (a real occurrence -- see
+      // matching.ts) can't credit that account's commitment achievement with
+      // units it never actually received.
+      const actualByAccountSkuMonth = new Map<string, number>();
+      function addActual(accountId: string | null, skuId: string | null, dateIso: string | null, qty: number) {
+        if (!accountId || !skuId || !dateIso) return;
         const month = dateIso.slice(0, 7);
         if (!months.includes(month)) return;
-        const key = `${skuId}|${month}`;
-        actualBySkuMonth.set(key, (actualBySkuMonth.get(key) ?? 0) + (qty || 0));
+        const key = `${accountId}|${skuId}|${month}`;
+        actualByAccountSkuMonth.set(key, (actualByAccountSkuMonth.get(key) ?? 0) + (qty || 0));
       }
-      (tallyRows ?? []).forEach((t) => addActual(t.sku_id, t.invoice_date, t.qty));
-      (billedRows ?? []).forEach((b) => addActual(b.sku_id, b.invoice_date, b.qty));
-      (closedRows ?? []).forEach((o) => o.order_lines.forEach((l) => addActual(l.sku_id, o.invoice_date, l.qty)));
+      (tallyRows ?? []).forEach((t) => addActual(t.account_id, t.sku_id, t.invoice_date, t.qty));
+      (billedRows ?? []).forEach((b) => addActual(b.account_id, b.sku_id, b.invoice_date, b.qty));
+      (closedRows ?? []).forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, o.invoice_date, l.qty)));
 
       const accounts = new Map<string, { label: string; commitmentStart: string | null }>();
       (skuRows ?? []).forEach((s) => {
@@ -121,7 +123,7 @@ export function UndercommitmentAlerts() {
             break;
           }
           const ratios = committedSkus.map((s) => {
-            const actual = actualBySkuMonth.get(`${s.id}|${month}`) ?? 0;
+            const actual = actualByAccountSkuMonth.get(`${accountId}|${s.id}|${month}`) ?? 0;
             return actual / (s.commitment_per_month as number);
           });
           const avg = ratios.reduce((a, b) => a + b, 0) / ratios.length;

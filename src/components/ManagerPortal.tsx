@@ -36,12 +36,14 @@ interface UsageRow {
 
 interface TallyLineRow {
   sku_id: string | null;
+  account_id: string | null;
   qty: number;
   invoice_date: string;
 }
 
 interface BilledConsignmentRow {
   sku_id: string;
+  account_id: string | null;
   qty: number;
   invoice_date: string | null;
 }
@@ -52,6 +54,7 @@ interface BillingLineRow {
 }
 
 interface ClosedSaleableRow {
+  account_id: string | null;
   invoice_date: string | null;
   order_lines: { sku_id: string; qty: number }[];
 }
@@ -120,21 +123,21 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
-        .select("sku_id, qty, invoice_date")
+        .select("sku_id, account_id, qty, invoice_date")
         .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<TallyLineRow[]>(),
       supabase
         .from("billing_requests")
-        .select("sku_id, qty, invoice_date")
+        .select("sku_id, account_id, qty, invoice_date")
         .eq("status", "billed")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<BilledConsignmentRow[]>(),
       supabase
         .from("orders")
-        .select("invoice_date, order_lines(sku_id, qty)")
+        .select("account_id, invoice_date, order_lines(sku_id, qty)")
         .eq("order_type", "saleable")
         .eq("status", "closed")
         .gte("invoice_date", start)
@@ -236,24 +239,28 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     );
   }
 
+  // Keyed by account_id + sku_id together, not sku_id alone -- a Tally
+  // description can fuzzy-match a similarly-named SKU that belongs to a
+  // DIFFERENT account (confirmed on a real invoice: Rajajinagar's "Treatment
+  // Licence Smile Pro" matched Bommasandra's unrelated "SMILE (Treatment)"
+  // SKU). matchSku now prefers the invoiced account's own catalog first
+  // (see matching.ts), but this keeps a bad sku_id -- from a past import, a
+  // manual override, or any future matching miss -- from crediting a
+  // commitment target that account never actually sold against.
   const actualBySku = new Map<string, number>();
-  tallyLines.forEach((t) => {
-    if (!t.sku_id) return;
-    actualBySku.set(t.sku_id, (actualBySku.get(t.sku_id) ?? 0) + (t.qty || 0));
-  });
-  billedConsignment.forEach((b) => {
-    actualBySku.set(b.sku_id, (actualBySku.get(b.sku_id) ?? 0) + (b.qty || 0));
-  });
-  closedSaleable.forEach((o) => {
-    o.order_lines.forEach((l) => {
-      actualBySku.set(l.sku_id, (actualBySku.get(l.sku_id) ?? 0) + (l.qty || 0));
-    });
-  });
+  function addActual(accountId: string | null, skuId: string | null, qty: number) {
+    if (!accountId || !skuId) return;
+    const key = `${accountId}|${skuId}`;
+    actualBySku.set(key, (actualBySku.get(key) ?? 0) + (qty || 0));
+  }
+  tallyLines.forEach((t) => addActual(t.account_id, t.sku_id, t.qty));
+  billedConsignment.forEach((b) => addActual(b.account_id, b.sku_id, b.qty));
+  closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty)));
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
   const achievements = skus
     .filter((s) => s.commitment_per_month)
-    .map((s) => (actualBySku.get(s.id) ?? 0) / (s.commitment_per_month as number));
+    .map((s) => (actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) / (s.commitment_per_month as number));
   const avgAch = achievements.length
     ? Math.round((achievements.reduce((a, b) => a + b, 0) / achievements.length) * 100)
     : null;

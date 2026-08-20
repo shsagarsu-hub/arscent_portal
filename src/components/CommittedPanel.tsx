@@ -90,7 +90,7 @@ export function CommittedPanel({
     const accountSkus = skus.filter((s) => s.account_id === accountId);
     const achievements = accountSkus
       .filter((s) => s.commitment_per_month)
-      .map((s) => (actualBySku.get(s.id) ?? 0) / ((s.commitment_per_month as number) * monthCount));
+      .map((s) => (actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) / ((s.commitment_per_month as number) * monthCount));
     // Raw 0-1 ratio, not a percentage number — achievementBadge() does its
     // own *100 for display (and its color thresholds assume a 0-1 scale),
     // same as the per-row call below. Pre-multiplying here double-counted
@@ -174,7 +174,7 @@ export function CommittedPanel({
                       </thead>
                       <tbody>
                         {accountSkus.map((s) => {
-                          const actual = actualBySku.get(s.id) ?? 0;
+                          const actual = actualBySku.get(`${s.account_id}|${s.id}`) ?? 0;
                           const target = s.commitment_per_month !== null ? s.commitment_per_month * monthCount : null;
                           const pct = target ? actual / target : null;
                           return (

@@ -63,38 +63,50 @@ export function RevenueMarginPanel() {
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
-          .select("sku_id, qty, rate, invoice_date")
+          .select("sku_id, account_id, qty, rate, invoice_date")
           .eq("document_type", "invoice")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string | null; qty: number; rate: number | null; invoice_date: string }[]>(),
+          .returns<{ sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string }[]>(),
         supabase
           .from("billing_requests")
-          .select("sku_id, qty, amount, invoice_date")
+          .select("sku_id, account_id, qty, amount, invoice_date")
           .eq("status", "billed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string; qty: number; amount: number | null; invoice_date: string | null }[]>(),
+          .returns<{ sku_id: string; account_id: string | null; qty: number; amount: number | null; invoice_date: string | null }[]>(),
         supabase
           .from("orders")
-          .select("invoice_date, order_lines(sku_id, qty, net_price)")
+          .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
           .eq("order_type", "saleable")
           .eq("status", "closed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ invoice_date: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]>(),
+          .returns<
+            { account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]
+          >(),
       ]);
 
+      // Keyed by account_id + sku_id together, not sku_id alone -- a Tally
+      // description can fuzzy-match a similarly-named SKU that belongs to a
+      // DIFFERENT account (confirmed on a real invoice: a Rajajinagar line
+      // matched an unrelated Bommasandra SKU, inflating Bommasandra's actual
+      // revenue by ~19L that was never actually billed to it). Keying by the
+      // invoice's own account_id, not the matched SKU's account_id, keeps a
+      // bad match from crediting revenue to the wrong account.
       const qtyMap = new Map<string, number>();
       const revMap = new Map<string, number>();
-      function add(skuId: string | null, dateIso: string | null, qty: number, revenue: number) {
-        if (!skuId || !inSelectedMonths(dateIso)) return;
-        qtyMap.set(skuId, (qtyMap.get(skuId) ?? 0) + (qty || 0));
-        revMap.set(skuId, (revMap.get(skuId) ?? 0) + (revenue || 0));
+      function add(accountId: string | null, skuId: string | null, dateIso: string | null, qty: number, revenue: number) {
+        if (!accountId || !skuId || !inSelectedMonths(dateIso)) return;
+        const key = `${accountId}|${skuId}`;
+        qtyMap.set(key, (qtyMap.get(key) ?? 0) + (qty || 0));
+        revMap.set(key, (revMap.get(key) ?? 0) + (revenue || 0));
       }
-      (tallyRows ?? []).forEach((t) => add(t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
-      (billedRows ?? []).forEach((b) => add(b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));
-      (closedRows ?? []).forEach((o) => o.order_lines.forEach((l) => add(l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0))));
+      (tallyRows ?? []).forEach((t) => add(t.account_id, t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
+      (billedRows ?? []).forEach((b) => add(b.account_id, b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));
+      (closedRows ?? []).forEach((o) =>
+        o.order_lines.forEach((l) => add(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0)))
+      );
 
       setSkus(skuRows ?? []);
       setActualQty(qtyMap);
@@ -136,8 +148,9 @@ export function RevenueMarginPanel() {
     const accountSkus = (skus ?? []).filter((s) => s.account_id === accountId);
     let fig: Figures = { actualRevenue: 0, committedRevenue: 0, actualCost: 0, committedCost: 0 };
     accountSkus.forEach((s) => {
-      const qty = actualQty.get(s.id) ?? 0;
-      fig.actualRevenue += actualRevenue.get(s.id) ?? 0;
+      const key = `${accountId}|${s.id}`;
+      const qty = actualQty.get(key) ?? 0;
+      fig.actualRevenue += actualRevenue.get(key) ?? 0;
       fig.actualCost += qty * (s.transfer_price ?? 0);
       if (s.commitment_per_month) {
         const targetQty = s.commitment_per_month * monthCount;
@@ -179,9 +192,10 @@ export function RevenueMarginPanel() {
     (skus ?? [])
       .filter((s) => s.account_id === a.id)
       .forEach((s) => {
-        const qty = actualQty.get(s.id) ?? 0;
+        const key = `${a.id}|${s.id}`;
+        const qty = actualQty.get(key) ?? 0;
         const cur = productFigures.get(s.name) ?? { actualRevenue: 0, committedRevenue: 0, actualCost: 0, committedCost: 0 };
-        cur.actualRevenue += actualRevenue.get(s.id) ?? 0;
+        cur.actualRevenue += actualRevenue.get(key) ?? 0;
         cur.actualCost += qty * (s.transfer_price ?? 0);
         if (s.commitment_per_month) {
           const targetQty = s.commitment_per_month * monthCount;

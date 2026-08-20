@@ -54,6 +54,35 @@ export interface SkuMatch {
   crossAccount: boolean;
 }
 
+function bestSkuMatch(
+  baseWords: Set<string>,
+  skus: { id: string; name: string; account_id: string }[]
+): { id: string; name: string; account_id: string; score: number } | null {
+  let best: { id: string; name: string; account_id: string; score: number } | null = null;
+  for (const s of skus) {
+    const skuWords = normalizeWords(s.name).filter((w) => w.length > 1);
+    const overlap = skuWords.filter((w) => baseWords.has(w)).length;
+    const score = skuWords.length ? overlap / skuWords.length : 0;
+    if (!best || score > best.score) best = { ...s, score };
+  }
+  return best;
+}
+
+/**
+ * Searches the invoiced account's own catalog FIRST, and only falls back to
+ * every account's SKUs if nothing there clears the confidence bar. A flat
+ * scoring bonus for same-account (the previous approach) isn't enough to
+ * protect against a short, generic SKU name elsewhere winning a coincidental
+ * full-word-overlap contest against the right, more specific in-account
+ * product: a real invoice's "Treatment Licence Smile Pro (10 Procedure)"
+ * matched Rajajinagar's own "SMILE Pro Pack (Lenticule)" at 2-of-4 words
+ * (0.5) but Bommasandra's unrelated "SMILE (Treatment)" at 2-of-2 words
+ * (1.0) beat it even with a +0.05 same-account bonus -- ten real invoice
+ * lines were misattributed to the wrong account before this was caught.
+ * Restricting the first pass to the invoiced account's own SKUs removes the
+ * cross-account contest entirely for the common case (the account's own
+ * catalog has the product), rather than trying to out-tune the bonus.
+ */
 export function matchSku(
   descriptionRaw: string,
   matchedAccountId: string | null,
@@ -62,17 +91,19 @@ export function matchSku(
   const base = stripPowerSpecs(descriptionRaw);
   const baseWords = new Set(normalizeWords(base));
 
-  let best: { id: string; name: string; account_id: string; score: number } | null = null;
-  for (const s of skus) {
-    const skuWords = normalizeWords(s.name).filter((w) => w.length > 1);
-    const overlap = skuWords.filter((w) => baseWords.has(w)).length;
-    const score = skuWords.length ? overlap / skuWords.length : 0;
-    // Small bonus for matching within the already-matched account, so a tie
-    // prefers the right account's SKU over an identically-named one elsewhere.
-    const adjusted = score + (s.account_id === matchedAccountId ? 0.05 : 0);
-    if (!best || adjusted > best.score) best = { ...s, score: adjusted };
+  if (matchedAccountId) {
+    const ownBest = bestSkuMatch(baseWords, skus.filter((s) => s.account_id === matchedAccountId));
+    if (ownBest && ownBest.score >= 0.3) {
+      return {
+        skuId: ownBest.id,
+        name: ownBest.name,
+        confidence: ownBest.score >= 0.7 ? "high" : "low",
+        crossAccount: false,
+      };
+    }
   }
 
+  const best = bestSkuMatch(baseWords, skus);
   if (!best || best.score < 0.3) return { skuId: null, name: null, confidence: "none", crossAccount: false };
   return {
     skuId: best.id,

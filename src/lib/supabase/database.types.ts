@@ -228,6 +228,21 @@ export type ReceivablePayment = {
   created_at: string;
 };
 
+export type CommitmentAdjustment = {
+  id: string;
+  account_id: string;
+  sku_id: string;
+  period_month: string;
+  actual_qty: number;
+  commitment_qty: number;
+  adjustment_type: "credit" | "debit";
+  adjustment_amount: number;
+  status: "pending" | "raised";
+  note_no: string | null;
+  raised_date: string | null;
+  created_at: string;
+};
+
 export type ConsignmentBalance = {
   account_id: string;
   account_label: string;
@@ -811,6 +826,53 @@ export interface Database {
             columns: ["recorded_by"];
             isOneToOne: false;
             referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      commitment_adjustments: {
+        Row: CommitmentAdjustment;
+        Insert: {
+          id?: string;
+          account_id: string;
+          sku_id: string;
+          period_month: string;
+          actual_qty: number;
+          commitment_qty: number;
+          adjustment_type: "credit" | "debit";
+          adjustment_amount: number;
+          status?: "pending" | "raised";
+          note_no?: string | null;
+          raised_date?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          account_id?: string;
+          sku_id?: string;
+          period_month?: string;
+          actual_qty?: number;
+          commitment_qty?: number;
+          adjustment_type?: "credit" | "debit";
+          adjustment_amount?: number;
+          status?: "pending" | "raised";
+          note_no?: string | null;
+          raised_date?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "commitment_adjustments_account_id_fkey";
+            columns: ["account_id"];
+            isOneToOne: false;
+            referencedRelation: "accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "commitment_adjustments_sku_id_fkey";
+            columns: ["sku_id"];
+            isOneToOne: false;
+            referencedRelation: "skus";
             referencedColumns: ["id"];
           },
         ];

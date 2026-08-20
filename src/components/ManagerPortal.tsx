@@ -11,6 +11,7 @@ import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
 import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
 import { UndercommitmentAlerts } from "./UndercommitmentAlerts";
+import { ExpiringStockAlert } from "./ExpiringStockAlert";
 import { RevenueMarginPanel } from "./RevenueMarginPanel";
 import { monthBounds, thisMonthISO } from "@/lib/dates";
 import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
@@ -302,6 +303,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           content: (
             <div className="space-y-4">
               <UndercommitmentAlerts />
+              <ExpiringStockAlert />
               <DashboardPanel />
               <RevenueMarginPanel />
               <CommittedPanel

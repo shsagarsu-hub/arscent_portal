@@ -10,6 +10,7 @@ import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
 import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
+import { ReceivablesPanel } from "./ReceivablesPanel";
 import { UndercommitmentAlerts } from "./UndercommitmentAlerts";
 import { ExpiringStockAlert } from "./ExpiringStockAlert";
 import { RevenueMarginPanel } from "./RevenueMarginPanel";
@@ -328,6 +329,12 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           label: "Purchase",
           icon: <TruckIcon />,
           content: <PurchaseOrderPanel />,
+        },
+        {
+          id: "receivables",
+          label: "Receivables",
+          icon: <ReceiptIcon />,
+          content: <ReceivablesPanel />,
         },
         {
           id: "orders",

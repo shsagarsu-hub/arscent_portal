@@ -218,6 +218,16 @@ export type TallyInvoiceLine = {
   created_at: string;
 };
 
+export type ReceivablePayment = {
+  id: string;
+  invoice_no: string;
+  amount_received: number;
+  utr: string;
+  payment_date: string;
+  recorded_by: string | null;
+  created_at: string;
+};
+
 export type ConsignmentBalance = {
   account_id: string;
   account_label: string;
@@ -771,6 +781,36 @@ export interface Database {
             columns: ["sku_id"];
             isOneToOne: false;
             referencedRelation: "skus";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      receivable_payments: {
+        Row: ReceivablePayment;
+        Insert: {
+          id?: string;
+          invoice_no: string;
+          amount_received: number;
+          utr: string;
+          payment_date: string;
+          recorded_by?: string | null;
+          created_at?: string;
+        };
+        Update: {
+          id?: string;
+          invoice_no?: string;
+          amount_received?: number;
+          utr?: string;
+          payment_date?: string;
+          recorded_by?: string | null;
+          created_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "receivable_payments_recorded_by_fkey";
+            columns: ["recorded_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
             referencedColumns: ["id"];
           },
         ];

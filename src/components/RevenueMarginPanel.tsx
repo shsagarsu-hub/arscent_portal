@@ -26,6 +26,32 @@ function inrOrDash(n: number) {
   return n === 0 ? "–" : inr(n);
 }
 
+type SortKey = "name" | "actualRevenue" | "actualCost" | "actualMargin" | "committedRevenue" | "committedCost" | "committedMargin";
+
+function SortHeader({
+  label,
+  sortKey,
+  activeKey,
+  dir,
+  onSort,
+}: {
+  label: string;
+  sortKey: SortKey;
+  activeKey: SortKey;
+  dir: "asc" | "desc";
+  onSort: (key: SortKey) => void;
+}) {
+  const active = sortKey === activeKey;
+  return (
+    <th className="cursor-pointer select-none text-right" onClick={() => onSort(sortKey)}>
+      {label}
+      <span className={`ml-0.5 inline-block w-3 ${active ? "text-ink" : "text-muted/40"}`}>
+        {active ? (dir === "asc" ? "▲" : "▼") : "▲"}
+      </span>
+    </th>
+  );
+}
+
 /**
  * Actual Revenue/Margin here uses the exact same three real sources (and the
  * exact same per-line revenue formula) as Dashboard's own Revenue Booked --
@@ -48,6 +74,17 @@ export function RevenueMarginPanel() {
   const [accountFilter, setAccountFilter] = useState("");
   const [actualQty, setActualQty] = useState<Map<string, number>>(new Map());
   const [actualRevenue, setActualRevenue] = useState<Map<string, number>>(new Map());
+  const [sortKey, setSortKey] = useState<SortKey>("name");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("asc");
+
+  function toggleSort(key: SortKey) {
+    if (key === sortKey) {
+      setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir(key === "name" ? "asc" : "desc");
+    }
+  }
 
   useEffect(() => {
     void (async () => {
@@ -217,7 +254,21 @@ export function RevenueMarginPanel() {
         productFigures.set(s.name, cur);
       });
   });
-  const productNames = Array.from(productFigures.keys()).sort((a, b) => a.localeCompare(b));
+  const productRows = Array.from(productFigures.entries())
+    .map(([name, fig]) => ({
+      name,
+      actualRevenue: fig.actualRevenue,
+      actualCost: fig.actualCost,
+      actualMargin: fig.actualRevenue - fig.actualCost,
+      committedRevenue: fig.committedRevenue,
+      committedCost: fig.committedCost,
+      committedMargin: fig.committedRevenue - fig.committedCost,
+    }))
+    .sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      if (sortKey === "name") return a.name.localeCompare(b.name) * dir;
+      return (a[sortKey] - b[sortKey]) * dir;
+    });
 
   if (skus === null) return <Loading />;
 
@@ -272,70 +323,63 @@ export function RevenueMarginPanel() {
             <table className="u-table">
               <thead>
                 <tr>
-                  <th>Line item</th>
-                  <th className="text-right">Actual</th>
-                  <th className="text-right">Committed</th>
+                  <th rowSpan={2} className="align-bottom">
+                    <span className="cursor-pointer select-none" onClick={() => toggleSort("name")}>
+                      Line item {sortKey === "name" && (sortDir === "asc" ? "▲" : "▼")}
+                    </span>
+                  </th>
+                  <th colSpan={3} className="text-center">
+                    Actual
+                  </th>
+                  <th colSpan={3} className="text-center">
+                    Committed
+                  </th>
+                </tr>
+                <tr>
+                  <SortHeader label="Revenue" sortKey="actualRevenue" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Cost" sortKey="actualCost" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Margin" sortKey="actualMargin" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Revenue" sortKey="committedRevenue" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Cost" sortKey="committedCost" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
+                  <SortHeader label="Margin" sortKey="committedMargin" activeKey={sortKey} dir={sortDir} onSort={toggleSort} />
                 </tr>
               </thead>
               <tbody>
-                <tr>
-                  <td colSpan={3} className="bg-app/60 font-extrabold text-ink">
-                    Revenue
-                  </td>
-                </tr>
-                {productNames.map((name) => {
-                  const fig = productFigures.get(name)!;
-                  return (
-                    <tr key={`rev-${name}`}>
-                      <td className="pl-5 text-muted">{name}</td>
-                      <td className="text-right">{inrOrDash(fig.actualRevenue)}</td>
-                      <td className="text-right">{inrOrDash(fig.committedRevenue)}</td>
-                    </tr>
-                  );
-                })}
-                <tr className="font-extrabold text-ink">
-                  <td>Total Revenue</td>
-                  <td className="text-right">{inr(totals.actualRevenue)}</td>
-                  <td className="text-right">{inr(totals.committedRevenue)}</td>
-                </tr>
-
-                <tr>
-                  <td colSpan={3} className="bg-app/60 pt-4 font-extrabold text-ink">
-                    Cost of Goods Sold
-                  </td>
-                </tr>
-                {productNames.map((name) => {
-                  const fig = productFigures.get(name)!;
-                  return (
-                    <tr key={`cogs-${name}`}>
-                      <td className="pl-5 text-muted">{name}</td>
-                      <td className="text-right">{inrOrDash(fig.actualCost)}</td>
-                      <td className="text-right">{inrOrDash(fig.committedCost)}</td>
-                    </tr>
-                  );
-                })}
+                {productRows.map((row) => (
+                  <tr key={row.name}>
+                    <td className="text-muted">{row.name}</td>
+                    <td className="text-right">{inrOrDash(row.actualRevenue)}</td>
+                    <td className="text-right">{inrOrDash(row.actualCost)}</td>
+                    <td className={`text-right ${row.actualMargin < 0 ? "text-bad-fg" : ""}`}>{inrOrDash(row.actualMargin)}</td>
+                    <td className="text-right">{inrOrDash(row.committedRevenue)}</td>
+                    <td className="text-right">{inrOrDash(row.committedCost)}</td>
+                    <td className={`text-right ${row.committedMargin < 0 ? "text-bad-fg" : ""}`}>{inrOrDash(row.committedMargin)}</td>
+                  </tr>
+                ))}
                 {(() => {
-                  const totalActualCost = productNames.reduce((a, n) => a + productFigures.get(n)!.actualCost, 0);
-                  const totalCommittedCost = productNames.reduce((a, n) => a + productFigures.get(n)!.committedCost, 0);
+                  const totalActualCost = productRows.reduce((a, r) => a + r.actualCost, 0);
+                  const totalCommittedCost = productRows.reduce((a, r) => a + r.committedCost, 0);
                   return (
                     <tr className="font-extrabold text-ink">
-                      <td>Total COGS</td>
+                      <td>Total</td>
+                      <td className="text-right">{inr(totals.actualRevenue)}</td>
                       <td className="text-right">{inr(totalActualCost)}</td>
+                      <td className={`text-right ${totals.actualMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.actualMargin)}</td>
+                      <td className="text-right">{inr(totals.committedRevenue)}</td>
                       <td className="text-right">{inr(totalCommittedCost)}</td>
+                      <td className={`text-right ${totals.committedMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.committedMargin)}</td>
                     </tr>
                   );
                 })()}
-
-                <tr className="font-extrabold text-ink">
-                  <td className="pt-4">Gross Margin (₹)</td>
-                  <td className={`pt-4 text-right ${totals.actualMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.actualMargin)}</td>
-                  <td className={`pt-4 text-right ${totals.committedMargin < 0 ? "text-bad-fg" : ""}`}>{inr(totals.committedMargin)}</td>
-                </tr>
                 <tr className="italic text-muted">
-                  <td>Gross Margin %</td>
+                  <td>Margin %</td>
+                  <td></td>
+                  <td></td>
                   <td className="text-right">
                     {totals.actualRevenue !== 0 ? `${((totals.actualMargin / totals.actualRevenue) * 100).toFixed(1)}%` : "–"}
                   </td>
+                  <td></td>
+                  <td></td>
                   <td className="text-right">
                     {totals.committedRevenue !== 0 ? `${((totals.committedMargin / totals.committedRevenue) * 100).toFixed(1)}%` : "–"}
                   </td>

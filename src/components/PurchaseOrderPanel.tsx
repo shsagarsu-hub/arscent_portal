@@ -182,6 +182,28 @@ export function PurchaseOrderPanel() {
   const [cancelingPo, setCancelingPo] = useState<string | null>(null);
   const [cancelStatus, setCancelStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // Loaded once -- the committed-SKU table is small (dozens of rows, not
+  // thousands like item_master) -- and matched client-side in pickItem
+  // rather than via .ilike(), because the match direction is the reverse of
+  // what ilike can express: it's the ITEM's stripped family name that needs
+  // to CONTAIN the short SKU name ("CT LUCIA" inside "ZEISS CT LUCIA 621P"),
+  // not the other way round. `skus.name ILIKE '%ZEISS CT LUCIA 621P%'` can
+  // only ever match a SKU name at least that long, and every real SKU name
+  // is shorter than the item family it's supposed to match -- so it never
+  // matched anything, in production or anywhere else.
+  const [transferPriceSkus, setTransferPriceSkus] = useState<{ name: string; transfer_price: number }[]>([]);
+
+  useEffect(() => {
+    void (async () => {
+      const { data } = await supabase
+        .from("skus")
+        .select("name, transfer_price")
+        .not("transfer_price", "is", null)
+        .returns<{ name: string; transfer_price: number }[]>();
+      setTransferPriceSkus(data ?? []);
+    })();
+  }, [supabase]);
+
   const loadRecent = useCallback(async () => {
     const { data } = await supabase
       .from("stock_movements")
@@ -270,17 +292,15 @@ export function PurchaseOrderPanel() {
     const currentLine = lines.find((l) => l.key === lineKey);
     updateLine(lineKey, { itemId, itemName });
     if (!itemId || (currentLine && currentLine.unitPrice.trim() !== "")) return;
-    const family = stripPowerSpecs(itemName).trim();
+    const family = stripPowerSpecs(itemName).trim().toUpperCase();
     if (family.length < 3) return;
-    const { data } = await supabase
-      .from("skus")
-      .select("transfer_price")
-      .ilike("name", `%${family}%`)
-      .not("transfer_price", "is", null)
-      .limit(1)
-      .maybeSingle();
-    if (data?.transfer_price != null) {
-      updateLine(lineKey, { unitPrice: String(data.transfer_price) });
+    // Longest matching SKU name wins, so a short, generic name (if one ever
+    // exists) can't shadow a more specific one that also matches.
+    const match = transferPriceSkus
+      .filter((s) => family.includes(s.name.toUpperCase()))
+      .sort((a, b) => b.name.length - a.name.length)[0];
+    if (match) {
+      updateLine(lineKey, { unitPrice: String(match.transfer_price) });
     }
   }
 

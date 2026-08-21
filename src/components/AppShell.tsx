@@ -123,6 +123,39 @@ export function AppShell({
     })();
   }, [showUserName]);
 
+  // Signs out and hard-redirects to /login after 30 minutes with no mouse,
+  // keyboard, scroll or touch activity. Lives here rather than per-page
+  // because AppShell is the one thing every authenticated screen (both
+  // portals) actually renders through -- one timer covers all of them.
+  // window.location.href (not router.push) is deliberate: this needs a
+  // real navigation so the server re-checks auth and the middleware
+  // actually bounces to /login once the session is gone, not a client-side
+  // route change that could leave stale authenticated UI on screen.
+  useEffect(() => {
+    const TIMEOUT_MS = 30 * 60 * 1000;
+    let timer: ReturnType<typeof setTimeout>;
+
+    function signOutForInactivity() {
+      void fetch("/auth/sign-out", { method: "POST" }).finally(() => {
+        window.location.href = "/login";
+      });
+    }
+
+    function resetTimer() {
+      clearTimeout(timer);
+      timer = setTimeout(signOutForInactivity, TIMEOUT_MS);
+    }
+
+    const events: (keyof WindowEventMap)[] = ["mousedown", "mousemove", "keydown", "scroll", "touchstart"];
+    events.forEach((e) => window.addEventListener(e, resetTimer, { passive: true }));
+    resetTimer();
+
+    return () => {
+      clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, resetTimer));
+    };
+  }, []);
+
   // Callers commonly render a one-tab "loading" AppShell first, then swap in
   // the real tabs once data arrives (see ManagerPortal/HospitalPortal). Since
   // it's the same component at the same position, React reuses this instance

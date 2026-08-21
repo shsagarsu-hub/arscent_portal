@@ -18,7 +18,8 @@ import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { MonthMultiSelect } from "./MonthMultiSelect";
 import { BoxIcon, ChartIcon, ClipboardIcon, ReceiptIcon } from "./icons";
-import { ExportButton } from "./ExportButton";
+import { MisExportButton } from "./MisExportButton";
+import type { MisSheet } from "@/lib/exportMis";
 
 interface TallyLineRow {
   invoice_no: string;
@@ -393,6 +394,88 @@ export function DashboardPanel() {
     };
   }, [filtered]);
 
+  // The full MIS behind this dashboard -- one sheet per breakdown shown
+  // above, unabridged (the charts truncate to top 10; this doesn't), plus a
+  // raw detail sheet. This is what "Export MIS to Excel" hands back -- the
+  // underlying data, not a picture of the charts.
+  const misSheets = useMemo<MisSheet[]>(() => {
+    const skuMap = new Map<string, number>();
+    filtered.forEach((e) => skuMap.set(e.sku, (skuMap.get(e.sku) ?? 0) + e.qty));
+    const allSkuRows = Array.from(skuMap.entries())
+      .map(([sku, qty]) => ({ sku, qty }))
+      .sort((a, b) => b.qty - a.qty);
+
+    return [
+      {
+        name: "Summary",
+        columns: [
+          { key: "label", label: "Metric", width: 24 },
+          { key: "value", label: "Value", width: 20 },
+        ],
+        rows: [
+          { label: "Revenue Booked", value: stats.revenue },
+          { label: "Invoices Booked", value: stats.invoices },
+          { label: "Units Booked", value: stats.qty },
+          { label: "Avg Invoice Value", value: stats.avgInvoiceValue },
+        ],
+      },
+      {
+        name: "Revenue by Month",
+        columns: [
+          { key: "month", label: "Month", width: 16 },
+          { key: "revenue", label: "Revenue", width: 18 },
+        ],
+        rows: revenueByMonth,
+      },
+      {
+        name: "Revenue by Account",
+        columns: [
+          { key: "account", label: "Account", width: 32 },
+          { key: "revenue", label: "Revenue", width: 18 },
+        ],
+        rows: revenueByAccount,
+      },
+      {
+        name: "Revenue by Source",
+        columns: [
+          { key: "source", label: "Source", width: 20 },
+          { key: "revenue", label: "Revenue", width: 18 },
+        ],
+        rows: revenueBySource,
+      },
+      {
+        name: "Units Booked by SKU",
+        columns: [
+          { key: "sku", label: "SKU", width: 36 },
+          { key: "qty", label: "Units booked", width: 16 },
+        ],
+        rows: allSkuRows,
+      },
+      {
+        name: "Orders by SKU",
+        columns: [
+          { key: "sku", label: "SKU", width: 36 },
+          { key: "orders", label: "Orders", width: 12 },
+          { key: "qty", label: "Qty", width: 12 },
+          { key: "value", label: "Value", width: 18 },
+        ],
+        rows: ordersBySku,
+      },
+      {
+        name: "Raw Revenue Events",
+        columns: [
+          { key: "date", label: "Date", width: 14 },
+          { key: "account", label: "Account", width: 32 },
+          { key: "sku", label: "SKU", width: 36 },
+          { key: "qty", label: "Qty", width: 10 },
+          { key: "revenue", label: "Revenue", width: 16 },
+          { key: "source", label: "Source", width: 16 },
+        ],
+        rows: filtered,
+      },
+    ];
+  }, [filtered, revenueByMonth, revenueByAccount, revenueBySource, ordersBySku, stats]);
+
   if (tallyRows === null || billedRows === null || saleableRows === null || allOrders === null) return <Loading />;
 
   return (
@@ -424,19 +507,7 @@ export function DashboardPanel() {
                 </option>
               ))}
             </select>
-            <ExportButton
-              dark
-              filename="revenue-events"
-              columns={[
-                { key: "date", label: "Date" },
-                { key: "account", label: "Account" },
-                { key: "sku", label: "SKU" },
-                { key: "qty", label: "Qty" },
-                { key: "revenue", label: "Revenue" },
-                { key: "source", label: "Source" },
-              ]}
-              rows={filtered}
-            />
+            <MisExportButton dark filename="dashboard-mis" sheets={misSheets} />
           </div>
         </div>
 
@@ -546,16 +617,6 @@ export function DashboardPanel() {
         eyebrow="Products"
         title="Units booked by SKU"
         height={Math.max(260, topSkus.length * 34)}
-        action={
-          <ExportButton
-            filename="units-booked-by-sku"
-            columns={[
-              { key: "sku", label: "SKU" },
-              { key: "qty", label: "Units booked" },
-            ]}
-            rows={topSkus}
-          />
-        }
       >
         {topSkus.length === 0 ? (
           <Empty title="No revenue in this window" body="Widen the period or account filter." />
@@ -598,16 +659,6 @@ export function DashboardPanel() {
               Every row in the orders table, any type or status — not just what&apos;s gone on to be billed.
             </p>
           </div>
-          <ExportButton
-            filename="orders-by-sku"
-            columns={[
-              { key: "sku", label: "SKU" },
-              { key: "orders", label: "Orders" },
-              { key: "qty", label: "Qty" },
-              { key: "value", label: "Value" },
-            ]}
-            rows={ordersBySku}
-          />
         </div>
         {ordersBySku.length === 0 ? (
           <Empty title="No orders in this window" body="Widen the period or account filter." />

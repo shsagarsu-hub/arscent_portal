@@ -162,6 +162,14 @@ export async function updateLogin(userId: string, formData: FormData) {
   });
   if (error) throw new Error(error.message);
 
+  // location_id absent from the form (older callers) leaves it untouched;
+  // present-but-empty means "whole account" and is written as null.
+  if (formData.has("location_id")) {
+    const locationId = str(formData, "location_id") || null;
+    const { error: profileErr } = await admin.from("profiles").update({ location_id: locationId }).eq("id", userId);
+    if (profileErr) throw new Error(profileErr.message);
+  }
+
   revalidatePath("/accounts");
 }
 

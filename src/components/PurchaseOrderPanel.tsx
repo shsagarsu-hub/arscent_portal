@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { submitPurchaseOrder } from "@/app/manager/purchase/actions";
 import { stripPowerSpecs } from "@/lib/tally/matching";
+import { workOrderNo } from "@/lib/orders/workOrderNo";
 
 // Arscent's standing Zeiss PO contacts, editable per send -- every PO to
 // date has gone to this same distribution list (see the "Arscent PO #15 &
@@ -176,6 +177,10 @@ export function PurchaseOrderPanel() {
   const [sending, setSending] = useState(false);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
+  const [woInput, setWoInput] = useState("");
+  const [woLoading, setWoLoading] = useState(false);
+  const [woStatus, setWoStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
   const [recent, setRecent] = useState<PurchaseMovementRow[] | null>(null);
   const [recentOpen, setRecentOpen] = useState(false);
   const [expandedPo, setExpandedPo] = useState<string | null>(null);
@@ -316,6 +321,91 @@ export function PurchaseOrderPanel() {
     }
   }
 
+  // Work order numbers aren't a stored column -- they're computed from the
+  // order's id + created_at (see workOrderNo) -- so "looking one up" means
+  // fetching candidate orders and recomputing the same formatted string for
+  // each until one matches what the AM typed. A hospital's order_lines only
+  // carry the generic committed sku on sku_id; the actual lens-power-specific
+  // item_master name the hospital picked lives inside notes as
+  // "<official item name>" or "<official item name> — <free note>" (see
+  // HospitalOrderForm's submit), so resolving a real purchasable item means
+  // parsing that back out and re-matching it against item_master by name.
+  async function loadFromWorkOrder() {
+    const target = woInput.trim().toUpperCase();
+    if (!target) return;
+    setWoLoading(true);
+    setWoStatus(null);
+    try {
+      const { data: orders, error } = await supabase
+        .from("orders")
+        .select("id, created_at, order_lines(qty, notes)")
+        .order("created_at", { ascending: false })
+        .limit(200)
+        .returns<{ id: string; created_at: string; order_lines: { qty: number; notes: string | null }[] }[]>();
+      if (error) throw new Error(error.message);
+
+      const match = (orders ?? []).find((o) => workOrderNo(o.id, o.created_at) === target);
+      if (!match) {
+        setWoStatus({ ok: false, text: `No order found with work order number ${target}.` });
+        return;
+      }
+      if (match.order_lines.length === 0) {
+        setWoStatus({ ok: false, text: `${target} has no line items to load.` });
+        return;
+      }
+
+      const resolved = await Promise.all(
+        match.order_lines.map(async (ol) => {
+          const officialName = (ol.notes ?? "").split(" — ")[0].trim();
+          if (!officialName) return { qty: ol.qty, itemId: "", itemName: "", resolved: false };
+          const { data: exact } = await supabase.from("item_master").select("id, name").eq("name", officialName).maybeSingle();
+          if (exact) return { qty: ol.qty, itemId: exact.id, itemName: exact.name, resolved: true };
+          const { data: fuzzy } = await supabase
+            .from("item_master")
+            .select("id, name")
+            .ilike("name", `%${officialName}%`)
+            .limit(1)
+            .maybeSingle();
+          if (fuzzy) return { qty: ol.qty, itemId: fuzzy.id, itemName: fuzzy.name, resolved: true };
+          return { qty: ol.qty, itemId: "", itemName: officialName, resolved: false };
+        })
+      );
+
+      const newLines: Line[] = resolved.map((r) => ({
+        key: Math.random().toString(36).slice(2),
+        itemId: r.itemId,
+        itemName: r.itemName,
+        qty: String(r.qty),
+        unitPrice: "",
+        hsn: "",
+      }));
+
+      // Replace the still-untouched default single blank line rather than
+      // appending after it, so loading a WO into a fresh form doesn't leave
+      // a stray empty row above the real lines.
+      const isUntouched = lines.length === 1 && !lines[0].itemId && !lines[0].itemName && lines[0].unitPrice.trim() === "";
+      setLines(isUntouched ? newLines : [...lines, ...newLines]);
+
+      newLines.forEach((nl) => {
+        if (nl.itemId) void pickItem(nl.key, nl.itemId, nl.itemName);
+      });
+
+      const unresolvedCount = resolved.filter((r) => !r.resolved).length;
+      setWoStatus({
+        ok: true,
+        text:
+          `Loaded ${newLines.length} line${newLines.length === 1 ? "" : "s"} from ${target}.` +
+          (unresolvedCount > 0
+            ? ` ${unresolvedCount} need${unresolvedCount === 1 ? "s" : ""} a manual product match — search to confirm.`
+            : ""),
+      });
+    } catch (err) {
+      setWoStatus({ ok: false, text: err instanceof Error ? err.message : "Failed to load work order." });
+    } finally {
+      setWoLoading(false);
+    }
+  }
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const toList = parseEmails(to);
@@ -381,6 +471,28 @@ export function PurchaseOrderPanel() {
                 Last sent: <span className="font-mono">{poNumberFromNotes(recent[0].notes)}</span> on{" "}
                 {new Date(recent[0].created_at).toLocaleDateString()}
               </p>
+            )}
+          </div>
+          <div className="mb-3.5 rounded-[6px] border border-dashed border-border bg-cream p-2.5">
+            <label className="field-label">Load line items from a work order</label>
+            <div className="flex gap-2">
+              <input
+                className="field-input flex-1"
+                placeholder="e.g. WO-20260812-4F2A9C"
+                value={woInput}
+                onChange={(e) => setWoInput(e.target.value)}
+              />
+              <button
+                type="button"
+                className="shrink-0 rounded-[4px] border border-border bg-card px-3 py-1.5 text-xs font-bold text-ink-soft disabled:opacity-50"
+                disabled={woLoading || !woInput.trim()}
+                onClick={() => void loadFromWorkOrder()}
+              >
+                {woLoading ? "Loading…" : "Load"}
+              </button>
+            </div>
+            {woStatus && (
+              <p className={`mt-1.5 text-[11.5px] font-semibold ${woStatus.ok ? "text-good-fg" : "text-bad-fg"}`}>{woStatus.text}</p>
             )}
           </div>
           <div className="mb-3 space-y-2">

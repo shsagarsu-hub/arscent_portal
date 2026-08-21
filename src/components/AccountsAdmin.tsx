@@ -186,7 +186,7 @@ function AccountCard({
         </div>
         <p className="mb-2 text-[11px] text-muted">
           {locations.length > 1
-            ? "One shared login covers every center below — the hospital picks which center per usage entry / order."
+            ? "Assign each login to one center below, or leave it whole-account and the hospital picks which center per usage entry / order."
             : "The physical center(s) under this account."}
         </p>
         <ul className="mb-2 flex flex-wrap gap-2">
@@ -220,7 +220,7 @@ function AccountCard({
         <div className="mb-2 flex items-center justify-between">
           <h4 className="text-xs font-bold uppercase tracking-wide text-muted-strong">Login</h4>
         </div>
-        <AccountLoginSection accountId={account.id} logins={logins} />
+        <AccountLoginSection accountId={account.id} locations={locations} logins={logins} />
       </div>
 
       <div className="mt-5 border-t border-border pt-4">
@@ -264,11 +264,20 @@ function AccountCard({
   );
 }
 
-function AccountLoginSection({ accountId, logins }: { accountId: string; logins: LoginProfile[] }) {
+function AccountLoginSection({
+  accountId,
+  locations,
+  logins,
+}: {
+  accountId: string;
+  locations: Pick<AccountLocation, "id" | "account_id" | "name">[];
+  logins: LoginProfile[];
+}) {
   const [showForm, setShowForm] = useState(false);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [locationId, setLocationId] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -285,14 +294,17 @@ function AccountLoginSection({ accountId, logins }: { accountId: string; logins:
       const fd = new FormData();
       fd.set("email", email);
       fd.set("password", password);
-      // location_id is always null here -- one login covers the whole
-      // account; if it has more than one center, the hospital picks which
-      // one per usage entry / order instead of it being fixed at login level.
-      await createLocationLogin(accountId, null, fd);
+      // An empty pick means "whole account" -- the hospital then picks which
+      // center per usage entry / order instead of it being fixed at login
+      // level. A non-empty pick locks this login to that one location: every
+      // read/write it does (stats, history, orders, usage log) is filtered
+      // to it automatically -- see HospitalPortal/HospitalOrderForm.
+      await createLocationLogin(accountId, locationId || null, fd);
       setSuccess(`Login created for ${email}.`);
       setEmail("");
       setPassword("");
       setConfirm("");
+      setLocationId("");
       setShowForm(false);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create login.");
@@ -306,7 +318,7 @@ function AccountLoginSection({ accountId, logins }: { accountId: string; logins:
       {logins.length > 0 && (
         <ul className="mb-2 flex flex-col gap-1.5">
           {logins.map((l) => (
-            <LoginRow key={l.id} login={l} />
+            <LoginRow key={l.id} login={l} locations={locations} />
           ))}
         </ul>
       )}
@@ -354,6 +366,18 @@ function AccountLoginSection({ accountId, logins }: { accountId: string; logins:
             onChange={(e) => setConfirm(e.target.value)}
             className="field-input"
           />
+          <select
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
+            className="field-input sm:col-span-3"
+          >
+            <option value="">Whole account (all locations)</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
           <div className="sm:col-span-3">
             <button type="submit" className="btn-primary !px-3 !py-1.5 text-xs" disabled={saving}>
               {saving ? "Creating…" : "Create login"}
@@ -367,15 +391,18 @@ function AccountLoginSection({ accountId, logins }: { accountId: string; logins:
   );
 }
 
-function LoginRow({ login }: { login: LoginProfile }) {
+function LoginRow({ login, locations }: { login: LoginProfile; locations: Pick<AccountLocation, "id" | "account_id" | "name">[] }) {
   const [showEdit, setShowEdit] = useState(false);
   const [email, setEmail] = useState(login.email);
   const [password, setPassword] = useState("");
   const [confirmPw, setConfirmPw] = useState("");
+  const [locationId, setLocationId] = useState(login.location_id ?? "");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  const assignedLocationName = locations.find((l) => l.id === login.location_id)?.name;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -389,6 +416,7 @@ function LoginRow({ login }: { login: LoginProfile }) {
       const fd = new FormData();
       fd.set("email", email);
       if (password) fd.set("password", password);
+      fd.set("location_id", locationId);
       await updateLogin(login.id, fd);
       setSuccess("Saved.");
       setPassword("");
@@ -418,7 +446,10 @@ function LoginRow({ login }: { login: LoginProfile }) {
   return (
     <li className="rounded-md border border-border bg-card px-2.5 py-1.5">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-xs font-semibold text-ink">{login.email}</span>
+        <span className="text-xs font-semibold text-ink">
+          {login.email}
+          <span className="ml-1.5 font-normal text-muted">— {assignedLocationName ?? "whole account"}</span>
+        </span>
         <div className="flex items-center gap-2.5">
           <button
             type="button"
@@ -426,6 +457,7 @@ function LoginRow({ login }: { login: LoginProfile }) {
             onClick={() => {
               setShowEdit((v) => !v);
               setEmail(login.email);
+              setLocationId(login.location_id ?? "");
               setError(null);
               setSuccess(null);
             }}
@@ -469,6 +501,18 @@ function LoginRow({ login }: { login: LoginProfile }) {
             className="field-input"
             disabled={!password}
           />
+          <select
+            value={locationId}
+            onChange={(e) => setLocationId(e.target.value)}
+            className="field-input sm:col-span-3"
+          >
+            <option value="">Whole account (all locations)</option>
+            {locations.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
           <div className="sm:col-span-3">
             <button type="submit" className="btn-primary !px-3 !py-1.5 text-xs" disabled={saving}>
               {saving ? "Saving…" : "Save"}

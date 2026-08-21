@@ -114,7 +114,15 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
 
   try {
     await transporter.sendMail({
-      from: `"Arscent Orders" <${GMAIL_USER}>`,
+      // Display name credits whichever hospital actually placed the order,
+      // even though the address itself has to stay Arscent's own Gmail
+      // account -- Gmail SMTP only sends as the authenticated account (or a
+      // verified alias of it), so a real NN/hospital From address would get
+      // rewritten or flagged as spoofed by the recipient's mail server.
+      from: `"${input.accountLabel} (via Arscent Orders)" <${GMAIL_USER}>`,
+      // Without this, hitting Reply on this email went to Arscent's own
+      // shared inbox instead of back to whoever actually placed the order.
+      replyTo: input.hospitalEmail || undefined,
       to: recipients,
       subject: `Order ${input.workOrderNo} — ${input.accountLabel}`,
       html,

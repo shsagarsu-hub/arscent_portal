@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { MonthMultiSelect } from "./MonthMultiSelect";
 import { monthBounds, thisMonthISO } from "@/lib/dates";
+import { ExportButton } from "./ExportButton";
 
 interface SkuRow {
   id: string;
@@ -101,11 +102,13 @@ export function RevenueMarginPanel() {
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
-          .select("sku_id, account_id, qty, rate, invoice_date")
+          .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
           .eq("document_type", "invoice")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string }[]>(),
+          .returns<
+            { sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string; invoice_no: string }[]
+          >(),
         supabase
           .from("billing_requests")
           .select("sku_id, account_id, qty, amount, invoice_date")
@@ -115,13 +118,18 @@ export function RevenueMarginPanel() {
           .returns<{ sku_id: string; account_id: string | null; qty: number; amount: number | null; invoice_date: string | null }[]>(),
         supabase
           .from("orders")
-          .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
+          .select("account_id, invoice_date, invoice_number, order_lines(sku_id, qty, net_price)")
           .eq("order_type", "saleable")
           .eq("status", "closed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
           .returns<
-            { account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]
+            {
+              account_id: string | null;
+              invoice_date: string | null;
+              invoice_number: string | null;
+              order_lines: { sku_id: string; qty: number; net_price: number | null }[];
+            }[]
           >(),
       ]);
 
@@ -150,9 +158,14 @@ export function RevenueMarginPanel() {
       }
       (tallyRows ?? []).forEach((t) => add(t.account_id, t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
       (billedRows ?? []).forEach((b) => add(b.account_id, b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));
-      (closedRows ?? []).forEach((o) =>
-        o.order_lines.forEach((l) => add(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0)))
-      );
+      // A closed saleable order whose invoice_number matches one already in
+      // tally_invoice_lines is the same sale recorded twice (e.g. an order
+      // backfilled to match a historical Tally import) -- Tally is
+      // authoritative, so skip it here rather than double-count.
+      const tallyInvoiceNos = new Set((tallyRows ?? []).map((t) => t.invoice_no));
+      (closedRows ?? [])
+        .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
+        .forEach((o) => o.order_lines.forEach((l) => add(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0))));
 
       setSkus(skuRows ?? []);
       setActualQty(qtyMap);
@@ -305,18 +318,33 @@ export function RevenueMarginPanel() {
         <Empty title="No accounts found" body="Add products under an account in the Accounts tab to see revenue and margin here." />
       ) : (
         <>
-          <div className="mb-3.5 flex items-end justify-between gap-3">
+          <div className="mb-3.5 flex flex-wrap items-end justify-between gap-3">
             <h4 className="text-[13px] font-extrabold text-ink">By product — actual vs committed P&amp;L</h4>
-            <div className="max-w-[260px] flex-1">
-              <label className="field-label">Client</label>
-              <select className="field-input" value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
-                <option value="">All accounts</option>
-                {accounts.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.label}
-                  </option>
-                ))}
-              </select>
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="max-w-[260px] flex-1">
+                <label className="field-label">Client</label>
+                <select className="field-input" value={accountFilter} onChange={(e) => setAccountFilter(e.target.value)}>
+                  <option value="">All accounts</option>
+                  {accounts.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <ExportButton
+                filename="revenue-margin-by-product"
+                columns={[
+                  { key: "name", label: "Product" },
+                  { key: "actualRevenue", label: "Actual Revenue" },
+                  { key: "actualCost", label: "Actual Cost" },
+                  { key: "actualMarginPct", label: "Actual Margin %" },
+                  { key: "committedRevenue", label: "Committed Revenue" },
+                  { key: "committedCost", label: "Committed Cost" },
+                  { key: "committedMarginPct", label: "Committed Margin %" },
+                ]}
+                rows={productRows}
+              />
             </div>
           </div>
           <p className="mb-3 text-xs text-muted">

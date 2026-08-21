@@ -3,6 +3,7 @@
 import { useMemo, useState } from "react";
 import { Empty } from "./AppShell";
 import { MonthMultiSelect } from "./MonthMultiSelect";
+import { ExportButton } from "./ExportButton";
 
 interface SkuRow {
   id: string;
@@ -100,9 +101,49 @@ export function CommittedPanel({
     return { productCount: skus.filter((s) => s.account_id === accountId).length };
   }
 
+  // Flattened across every visible account/product -- same figures the
+  // expandable table below renders, just as one exportable list rather than
+  // per-account collapsed sections.
+  const exportRows = useMemo(
+    () =>
+      visibleAccounts.flatMap((a) => {
+        const monthCount = eligibleMonthCount(a.commitmentStart);
+        return skus
+          .filter((s) => s.account_id === a.id)
+          .map((s) => {
+            const actual = (actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1);
+            const target = s.commitment_per_month !== null ? s.commitment_per_month * monthCount : null;
+            return {
+              account: a.label,
+              product: s.name,
+              committedPerMonth: s.commitment_per_month ?? "",
+              target: target ?? "",
+              actual,
+              achievementPct: target ? Math.round((actual / target) * 100) : "",
+            };
+          });
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [visibleAccounts, skus, actualBySku, months]
+  );
+
   return (
     <div className="card">
-      <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Actual vs committed</h3>
+      <div className="mb-3.5 flex flex-wrap items-start justify-between gap-2">
+        <h3 className="text-[14.5px] font-extrabold text-ink">Actual vs committed</h3>
+        <ExportButton
+          filename="actual-vs-committed"
+          columns={[
+            { key: "account", label: "Account" },
+            { key: "product", label: "Product" },
+            { key: "committedPerMonth", label: "Committed / month" },
+            { key: "target", label: "Target" },
+            { key: "actual", label: "Actual" },
+            { key: "achievementPct", label: "Achievement %" },
+          ]}
+          rows={exportRows}
+        />
+      </div>
 
       <div className="mb-3.5 flex flex-wrap gap-3">
         <div>

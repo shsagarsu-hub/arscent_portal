@@ -62,11 +62,13 @@ export function UndercommitmentAlerts() {
           .returns<SkuRow[]>(),
         supabase
           .from("tally_invoice_lines")
-          .select("sku_id, account_id, qty, rate, invoice_date")
+          .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
           .eq("document_type", "invoice")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
-          .returns<{ sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string }[]>(),
+          .returns<
+            { sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string; invoice_no: string }[]
+          >(),
         supabase
           .from("billing_requests")
           .select("sku_id, account_id, qty, amount, invoice_date")
@@ -76,13 +78,18 @@ export function UndercommitmentAlerts() {
           .returns<{ sku_id: string; account_id: string | null; qty: number; amount: number | null; invoice_date: string | null }[]>(),
         supabase
           .from("orders")
-          .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
+          .select("account_id, invoice_date, invoice_number, order_lines(sku_id, qty, net_price)")
           .eq("order_type", "saleable")
           .eq("status", "closed")
           .gte("invoice_date", start)
           .lt("invoice_date", end)
           .returns<
-            { account_id: string | null; invoice_date: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]
+            {
+              account_id: string | null;
+              invoice_date: string | null;
+              invoice_number: string | null;
+              order_lines: { sku_id: string; qty: number; net_price: number | null }[];
+            }[]
           >(),
       ]);
 
@@ -105,9 +112,14 @@ export function UndercommitmentAlerts() {
       }
       (tallyRows ?? []).forEach((t) => addActual(t.account_id, t.sku_id, t.invoice_date, t.qty, t.qty * (t.rate ?? 0)));
       (billedRows ?? []).forEach((b) => addActual(b.account_id, b.sku_id, b.invoice_date, b.qty, b.amount ?? 0));
-      (closedRows ?? []).forEach((o) =>
-        o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0)))
-      );
+      // A closed saleable order whose invoice_number matches one already in
+      // tally_invoice_lines is the same sale recorded twice (e.g. an order
+      // backfilled to match a historical Tally import) -- Tally is
+      // authoritative, so skip it here rather than double-count.
+      const tallyInvoiceNos = new Set((tallyRows ?? []).map((t) => t.invoice_no));
+      (closedRows ?? [])
+        .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
+        .forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, o.invoice_date, l.qty, l.qty * (l.net_price ?? 0))));
 
       const accounts = new Map<string, { label: string; commitmentStart: string | null }>();
       (skuRows ?? []).forEach((s) => {

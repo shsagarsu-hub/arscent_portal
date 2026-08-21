@@ -44,6 +44,7 @@ interface TallyLineRow {
   qty: number;
   rate: number | null;
   invoice_date: string;
+  invoice_no: string;
 }
 
 interface BilledConsignmentRow {
@@ -62,6 +63,7 @@ interface BillingLineRow {
 interface ClosedSaleableRow {
   account_id: string | null;
   invoice_date: string | null;
+  invoice_number: string | null;
   order_lines: { sku_id: string; qty: number; net_price: number | null }[];
 }
 
@@ -129,7 +131,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
-        .select("sku_id, account_id, qty, rate, invoice_date")
+        .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
         .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
@@ -143,7 +145,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
         .returns<BilledConsignmentRow[]>(),
       supabase
         .from("orders")
-        .select("account_id, invoice_date, order_lines(sku_id, qty, net_price)")
+        .select("account_id, invoice_date, invoice_number, order_lines(sku_id, qty, net_price)")
         .eq("order_type", "saleable")
         .eq("status", "closed")
         .gte("invoice_date", start)
@@ -267,7 +269,14 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   }
   tallyLines.forEach((t) => addActual(t.account_id, t.sku_id, t.qty, t.qty * (t.rate ?? 0)));
   billedConsignment.forEach((b) => addActual(b.account_id, b.sku_id, b.qty, b.amount ?? 0));
-  closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
+  // A closed saleable order whose invoice_number matches one already in
+  // tally_invoice_lines is the same sale recorded twice (e.g. an order
+  // backfilled to match a historical Tally import) -- Tally is authoritative,
+  // so skip it here rather than double-count toward the commitment target.
+  const tallyInvoiceNos = new Set(tallyLines.map((t) => t.invoice_no));
+  closedSaleable
+    .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
+    .forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
   // How many of the selected months actually count toward this SKU's

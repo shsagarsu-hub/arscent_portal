@@ -4,6 +4,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { MovementImportPanel } from "./inventory/MovementImportPanel";
+import { ExportButton } from "./ExportButton";
 import { CATEGORY_LABELS, HOSPITAL_CATEGORIES, MOVEMENT_CATEGORY_KEYS } from "@/lib/inventory/movementCategories";
 import type { MovementCategory } from "@/lib/supabase/database.types";
 
@@ -901,16 +902,32 @@ export function InventoryPanel() {
       </div>
 
       <div className="card">
-        <button
-          type="button"
-          className="flex w-full items-center justify-between text-left"
-          onClick={() => setWarehouseStockOpen((o) => !o)}
-        >
-          <div>
-            <h3 className="text-[14.5px] font-extrabold text-ink">Warehouse stock</h3>
-          </div>
-          <span className="ml-3 shrink-0 text-lg text-muted">{warehouseStockOpen ? "−" : "+"}</span>
-        </button>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            className="flex flex-1 items-center justify-between text-left"
+            onClick={() => setWarehouseStockOpen((o) => !o)}
+          >
+            <div>
+              <h3 className="text-[14.5px] font-extrabold text-ink">Warehouse stock</h3>
+            </div>
+            <span className="ml-3 shrink-0 text-lg text-muted">{warehouseStockOpen ? "−" : "+"}</span>
+          </button>
+          <ExportButton
+            filename="warehouse-stock"
+            columns={[
+              { key: "name", label: "Item" },
+              { key: "purchase_in", label: "Purchase In" },
+              { key: "dc_out", label: "DC Out" },
+              { key: "sale_out", label: "Sale Out" },
+              { key: "material_out", label: "Material Out" },
+              { key: "dc_return_in", label: "DC Return In" },
+              { key: "material_in", label: "Material In" },
+              { key: "balance", label: "Balance" },
+            ]}
+            rows={warehouse}
+          />
+        </div>
         {warehouseStockOpen && (
         <div className="mt-3.5">
         {warehouse.length === 0 ? (
@@ -1029,7 +1046,21 @@ export function InventoryPanel() {
       </div>
 
       <div className="card">
-        <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Consignment by hospital</h3>
+        <div className="mb-3.5 flex items-center justify-between gap-2">
+          <h3 className="text-[14.5px] font-extrabold text-ink">Consignment by hospital</h3>
+          <ExportButton
+            filename="consignment-by-hospital"
+            columns={[
+              { key: "account_label", label: "Hospital" },
+              { key: "item_name", label: "Item" },
+              { key: "sent", label: "Sent" },
+              { key: "returned", label: "Returned" },
+              { key: "consumed", label: "Consumed" },
+              { key: "balance", label: "Balance" },
+            ]}
+            rows={consignment}
+          />
+        </div>
         {consignment.length === 0 ? (
           <Empty title="Nothing out on consignment" body="Log a 'Sent to Hospital' movement to start tracking it." />
         ) : (

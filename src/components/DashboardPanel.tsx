@@ -18,6 +18,7 @@ import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { MonthMultiSelect } from "./MonthMultiSelect";
 import { BoxIcon, ChartIcon, ClipboardIcon, ReceiptIcon } from "./icons";
+import { ExportButton } from "./ExportButton";
 
 interface TallyLineRow {
   invoice_no: string;
@@ -46,6 +47,16 @@ interface ClosedSaleableRow {
   id: string;
   invoice_number: string | null;
   invoice_date: string | null;
+  account_id: string;
+  accounts: { label: string } | null;
+  order_lines: { qty: number; net_price: number | null; skus: { name: string } | null }[];
+}
+
+interface OrderRow {
+  id: string;
+  order_type: string;
+  status: string;
+  created_at: string;
   account_id: string;
   accounts: { label: string } | null;
   order_lines: { qty: number; net_price: number | null; skus: { name: string } | null }[];
@@ -160,18 +171,23 @@ function ChartCard({
   eyebrow,
   title,
   height,
+  action,
   children,
 }: {
   eyebrow: string;
   title: string;
   height?: number;
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <div className="card shadow-[0_1px_3px_rgba(23,37,68,0.06)]">
-      <div className="mb-3.5">
-        <span className="text-[10px] font-extrabold uppercase tracking-wider text-brand">{eyebrow}</span>
-        <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">{title}</h3>
+      <div className="mb-3.5 flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <span className="text-[10px] font-extrabold uppercase tracking-wider text-brand">{eyebrow}</span>
+          <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">{title}</h3>
+        </div>
+        {action}
       </div>
       <div style={height ? { width: "100%", height } : undefined}>{children}</div>
     </div>
@@ -192,12 +208,13 @@ export function DashboardPanel() {
   const [tallyRows, setTallyRows] = useState<TallyLineRow[] | null>(null);
   const [billedRows, setBilledRows] = useState<BilledConsignmentRow[] | null>(null);
   const [saleableRows, setSaleableRows] = useState<ClosedSaleableRow[] | null>(null);
+  const [allOrders, setAllOrders] = useState<OrderRow[] | null>(null);
   const [accounts, setAccounts] = useState<AccountOption[]>([]);
   const [months, setMonths] = useState<string[]>(() => lastNMonths(12));
   const [accountFilter, setAccountFilter] = useState("");
 
   const load = useCallback(async () => {
-    const [{ data: tally }, { data: billed }, { data: saleable }, { data: accountRows }] = await Promise.all([
+    const [{ data: tally }, { data: billed }, { data: saleable }, { data: orders }, { data: accountRows }] = await Promise.all([
       supabase
         .from("tally_invoice_lines")
         .select(
@@ -215,11 +232,20 @@ export function DashboardPanel() {
         .eq("order_type", "saleable")
         .eq("status", "closed")
         .returns<ClosedSaleableRow[]>(),
+      // Every order regardless of type/status -- unlike the revenue events
+      // above (which only count what's actually billed), this report is
+      // meant to answer "what has been ordered" literally from the orders
+      // table itself, the same data Orders/Consignment already work from.
+      supabase
+        .from("orders")
+        .select("id, order_type, status, created_at, account_id, accounts(label), order_lines(qty, net_price, skus(name))")
+        .returns<OrderRow[]>(),
       supabase.from("accounts").select("id, label").order("label"),
     ]);
     setTallyRows(tally ?? []);
     setBilledRows(billed ?? []);
     setSaleableRows(saleable ?? []);
+    setAllOrders(orders ?? []);
     setAccounts(accountRows ?? []);
   }, [supabase]);
 
@@ -256,8 +282,16 @@ export function DashboardPanel() {
       source: "Consignment" as const,
       isInvoiceDocument: true,
     }));
+    // A closed saleable order whose invoice_number matches one already
+    // present in tally_invoice_lines is the SAME real-world sale recorded
+    // twice -- e.g. an order backfilled to match a historical Tally import
+    // (see NN1/NN2 backfill). Tally is the authoritative accounting record,
+    // so that order is excluded here rather than double-counted; a genuine
+    // saleable order that was never re-entered into Tally has no matching
+    // invoice_no and still counts normally.
+    const tallyInvoiceNos = new Set((tallyRows ?? []).map((r) => r.invoice_no));
     const fromSaleable = (saleableRows ?? [])
-      .filter((o) => o.invoice_date)
+      .filter((o) => o.invoice_date && !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
       .flatMap((o) =>
         o.order_lines.map((l) => ({
           date: o.invoice_date as string,
@@ -316,6 +350,29 @@ export function DashboardPanel() {
       .reverse(); // vertical bar chart reads bottom-to-top, so reverse for biggest-on-top
   }, [filtered]);
 
+  // Distinct from Top SKUs above -- that's revenue booked (Tally + billed
+  // consignment + closed saleable), this is literally every row in the
+  // orders table regardless of type or status, so an AM can see what's
+  // actually been placed/requested, not just what's gone on to be billed.
+  const ordersBySku = useMemo(() => {
+    const map = new Map<string, { orders: Set<string>; qty: number; value: number }>();
+    (allOrders ?? [])
+      .filter((o) => (!accountFilter || o.account_id === accountFilter) && (months.length === 0 || months.includes(monthKey(o.created_at))))
+      .forEach((o) => {
+        o.order_lines.forEach((l) => {
+          const sku = l.skus?.name ?? "—";
+          const entry = map.get(sku) ?? { orders: new Set<string>(), qty: 0, value: 0 };
+          entry.orders.add(o.id);
+          entry.qty += l.qty;
+          entry.value += l.qty * (l.net_price ?? 0);
+          map.set(sku, entry);
+        });
+      });
+    return Array.from(map.entries())
+      .map(([sku, v]) => ({ sku, orders: v.orders.size, qty: v.qty, value: v.value }))
+      .sort((a, b) => b.qty - a.qty);
+  }, [allOrders, accountFilter, months]);
+
   const revenueBySource = useMemo(() => {
     const map = new Map<string, number>();
     filtered.forEach((e) => {
@@ -336,7 +393,7 @@ export function DashboardPanel() {
     };
   }, [filtered]);
 
-  if (tallyRows === null || billedRows === null || saleableRows === null) return <Loading />;
+  if (tallyRows === null || billedRows === null || saleableRows === null || allOrders === null) return <Loading />;
 
   return (
     <div className="space-y-4">
@@ -351,7 +408,7 @@ export function DashboardPanel() {
             </span>
             <h3 className="mt-0.5 text-[17px] font-extrabold text-white">Dashboard &amp; Reports</h3>
           </div>
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <MonthMultiSelect months={months} onChange={setMonths} dark allowAllTime />
             <select
               className="rounded-[6px] border-0 bg-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-white outline-none [color-scheme:dark]"
@@ -367,6 +424,19 @@ export function DashboardPanel() {
                 </option>
               ))}
             </select>
+            <ExportButton
+              dark
+              filename="revenue-events"
+              columns={[
+                { key: "date", label: "Date" },
+                { key: "account", label: "Account" },
+                { key: "sku", label: "SKU" },
+                { key: "qty", label: "Qty" },
+                { key: "revenue", label: "Revenue" },
+                { key: "source", label: "Source" },
+              ]}
+              rows={filtered}
+            />
           </div>
         </div>
 
@@ -474,8 +544,18 @@ export function DashboardPanel() {
 
       <ChartCard
         eyebrow="Products"
-        title="Orders placed by SKU"
+        title="Units booked by SKU"
         height={Math.max(260, topSkus.length * 34)}
+        action={
+          <ExportButton
+            filename="units-booked-by-sku"
+            columns={[
+              { key: "sku", label: "SKU" },
+              { key: "qty", label: "Units booked" },
+            ]}
+            rows={topSkus}
+          />
+        }
       >
         {topSkus.length === 0 ? (
           <Empty title="No revenue in this window" body="Widen the period or account filter." />
@@ -508,6 +588,54 @@ export function DashboardPanel() {
           </ResponsiveContainer>
         )}
       </ChartCard>
+
+      <div className="card shadow-[0_1px_3px_rgba(23,37,68,0.06)]">
+        <div className="mb-3.5 flex flex-wrap items-start justify-between gap-2">
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider text-brand">Products</span>
+            <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">Orders by SKU</h3>
+            <p className="mt-0.5 text-[11px] text-muted">
+              Every row in the orders table, any type or status — not just what&apos;s gone on to be billed.
+            </p>
+          </div>
+          <ExportButton
+            filename="orders-by-sku"
+            columns={[
+              { key: "sku", label: "SKU" },
+              { key: "orders", label: "Orders" },
+              { key: "qty", label: "Qty" },
+              { key: "value", label: "Value" },
+            ]}
+            rows={ordersBySku}
+          />
+        </div>
+        {ordersBySku.length === 0 ? (
+          <Empty title="No orders in this window" body="Widen the period or account filter." />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12.5px]">
+              <thead>
+                <tr className="border-b border-border text-left text-[11px] font-bold uppercase tracking-wide text-muted-strong">
+                  <th className="py-1.5 pr-3">SKU</th>
+                  <th className="py-1.5 pr-3 text-right">Orders</th>
+                  <th className="py-1.5 pr-3 text-right">Qty</th>
+                  <th className="py-1.5 text-right">Value</th>
+                </tr>
+              </thead>
+              <tbody>
+                {ordersBySku.map((row) => (
+                  <tr key={row.sku} className="border-b border-border last:border-0">
+                    <td className="py-1.5 pr-3 font-semibold text-ink">{row.sku}</td>
+                    <td className="py-1.5 pr-3 text-right">{row.orders}</td>
+                    <td className="py-1.5 pr-3 text-right">{row.qty.toLocaleString("en-IN")}</td>
+                    <td className="py-1.5 text-right">{inr(row.value)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -156,6 +156,23 @@ export function AppShell({
     };
   }, []);
 
+  // After sign-out, pressing the browser's Back button can restore this
+  // exact authenticated page straight from the browser's bfcache -- a pure
+  // in-memory snapshot the browser shows without ever asking the server
+  // again, so the per-page auth check never gets a chance to run and the
+  // old signed-in screen flashes back up even though the session is gone.
+  // `pageshow` with `persisted: true` is the standard signal for exactly
+  // this restore; forcing a reload turns it into a real navigation, which
+  // both fixes the stale UI and sidesteps whatever the browser does with a
+  // cached POST-redirect history entry (the intermittent 405 on Back).
+  useEffect(() => {
+    function handlePageShow(e: PageTransitionEvent) {
+      if (e.persisted) window.location.reload();
+    }
+    window.addEventListener("pageshow", handlePageShow);
+    return () => window.removeEventListener("pageshow", handlePageShow);
+  }, []);
+
   // Callers commonly render a one-tab "loading" AppShell first, then swap in
   // the real tabs once data arrives (see ManagerPortal/HospitalPortal). Since
   // it's the same component at the same position, React reuses this instance

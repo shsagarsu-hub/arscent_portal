@@ -4,6 +4,7 @@ import { Fragment, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { closeReceivable, reopenReceivable } from "@/app/manager/receivables/actions";
+import { ExportButton } from "./ExportButton";
 
 interface InvoiceLineRow {
   invoice_no: string;
@@ -210,7 +211,21 @@ export function ReceivablesPanel() {
 
   return (
     <div className="card">
-      <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Receivables</h3>
+      <div className="mb-1 flex flex-wrap items-start justify-between gap-2">
+        <h3 className="text-[14.5px] font-extrabold text-ink">Receivables</h3>
+        <ExportButton
+          filename="receivables-due"
+          columns={[
+            { key: "invoiceNo", label: "Invoice" },
+            { key: "accountLabel", label: "Account" },
+            { key: "invoiceDate", label: "Invoice date" },
+            { key: "dueDate", label: "Due date" },
+            { key: "daysDue", label: "Days due" },
+            { key: "total", label: "Amount" },
+          ]}
+          rows={due}
+        />
+      </div>
       <p className="mb-3.5 text-xs text-muted">
         Every confirmed Tally invoice, due as per each account&apos;s payment term (set in Accounts). A due line closes only
         by recording the amount received, UTR, and payment date.

@@ -238,6 +238,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     return (
       <AppShell
         ctx="Account Manager"
+        showUserName
         stats={[]}
         tabs={[{ id: "loading", label: "Loading", content: <Loading /> }]}
         maxWidthClass="max-w-[1400px]"
@@ -269,13 +270,28 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   closedSaleable.forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
+  // How many of the selected months actually count toward this SKU's
+  // target -- same logic CommittedPanel/RevenueMarginPanel already use.
+  // Without this, the target stayed a single month's commitment while
+  // actual summed every selected month, so selecting a wider range (e.g.
+  // "12 months") inflated every ratio by up to 12x -- confirmed live: a
+  // product committed at 2/month with 6 actual over a 12-month window read
+  // as 300% instead of the correct ~25%.
+  function eligibleMonthCount(commitmentStart: string | null) {
+    const eligible = commitmentStart ? months.filter((m) => m >= commitmentStart.slice(0, 7)) : months;
+    return eligible.length || 1;
+  }
   // actualBySku is in raw invoice-line units (e.g. "packs"); commitment_per_
   // month is quoted per single procedure/unit, same granularity as
   // price_ex_gst/transfer_price, so it needs the same units_per_pack
   // conversion RevenueMarginPanel applies before comparing against target.
   const achievements = skus
     .filter((s) => s.commitment_per_month)
-    .map((s) => ((actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1)) / (s.commitment_per_month as number));
+    .map((s) => {
+      const monthCount = eligibleMonthCount(s.accounts?.commitment_start ?? null);
+      const actual = (actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1);
+      return actual / ((s.commitment_per_month as number) * monthCount);
+    });
   const avgAch = achievements.length
     ? Math.round((achievements.reduce((a, b) => a + b, 0) / achievements.length) * 100)
     : null;
@@ -283,6 +299,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   return (
     <AppShell
       ctx="Account Manager"
+      showUserName
       maxWidthClass="max-w-[1400px]"
       stats={[
         { value: centersReporting, label: "Centers Reporting" },

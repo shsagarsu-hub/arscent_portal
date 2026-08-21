@@ -1,8 +1,9 @@
 "use client";
 
 import Link from "next/link";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Wordmark } from "./Wordmark";
+import { createClient } from "@/lib/supabase/client";
 
 export interface AppTab {
   id: string;
@@ -79,12 +80,19 @@ export function AppShell({
   showSignOut = true,
   maxWidthClass = "max-w-[640px]",
   accentColor,
+  showUserName = false,
 }: {
   ctx: string;
   stats: { value: string | number; label: string }[];
   tabs: AppTab[];
   extraNav?: { href: string; label: string; icon?: ReactNode }[];
   showSignOut?: boolean;
+  /** Shows the logged-in user's own name above `ctx` in the sidebar (e.g.
+   * "Sagar" / "Account Manager-Zeiss") instead of just `ctx` alone --
+   * opt-in because the hospital portal already uses `ctx` for something
+   * else entirely (the hospital's own location/account name), not a role
+   * label, so this can't just always turn on. */
+  showUserName?: boolean;
   /** The hospital portal's forms are simple and stay comfortably narrow at
    * the default. The account manager's tables (Inventory especially — 10
    * columns of batch/expiry/movement data) need real desktop width, so it
@@ -100,6 +108,20 @@ export function AppShell({
 }) {
   const [active, setActive] = useState(tabs[0]?.id);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [userName, setUserName] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!showUserName) return;
+    const supabase = createClient();
+    void (async () => {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) return;
+      const { data: profile } = await supabase.from("profiles").select("full_name").eq("id", user.id).maybeSingle();
+      setUserName(profile?.full_name ?? null);
+    })();
+  }, [showUserName]);
 
   // Callers commonly render a one-tab "loading" AppShell first, then swap in
   // the real tabs once data arrives (see ManagerPortal/HospitalPortal). Since
@@ -148,7 +170,14 @@ export function AppShell({
         </div>
 
         <div className="border-b border-white/10 px-4 py-3">
-          <div className="truncate text-[12.5px] font-semibold text-white/80">{ctx}</div>
+          {showUserName && userName ? (
+            <>
+              <div className="truncate text-[13.5px] font-extrabold text-white">{userName}</div>
+              <div className="truncate text-[11px] font-semibold text-white/60">{ctx}-Zeiss</div>
+            </>
+          ) : (
+            <div className="truncate text-[12.5px] font-semibold text-white/80">{ctx}</div>
+          )}
         </div>
 
         <nav className="flex-1 space-y-0.5 overflow-y-auto px-2 py-3">

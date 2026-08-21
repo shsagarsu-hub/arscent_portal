@@ -33,6 +33,7 @@ export function AccountsAdmin({
   return (
     <AppShell
       ctx="Account Manager"
+      showUserName
       stats={[]}
       maxWidthClass="max-w-[860px]"
       extraNav={[

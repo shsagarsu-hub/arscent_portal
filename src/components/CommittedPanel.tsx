@@ -87,23 +87,17 @@ export function CommittedPanel({
     return eligible.length || 1; // accounts with 0 eligible months are already filtered out above
   }
 
-  function accountSummary(accountId: string, monthCount: number) {
-    const accountSkus = skus.filter((s) => s.account_id === accountId);
-    const achievements = accountSkus
-      .filter((s) => s.commitment_per_month)
-      .map(
-        (s) =>
-          ((actualBySku.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1)) /
-          ((s.commitment_per_month as number) * monthCount)
-      );
-    // Raw 0-1 ratio, not a percentage number — achievementBadge() does its
-    // own *100 for display (and its color thresholds assume a 0-1 scale),
-    // same as the per-row call below. Pre-multiplying here double-counted
-    // the *100 and inflated every account header 100x (27% rendered "2700%").
-    const avg = achievements.length
-      ? achievements.reduce((a, b) => a + b, 0) / achievements.length
-      : null;
-    return { productCount: accountSkus.length, avg };
+  // A single blended average across an account's products was removed here
+  // -- an unweighted mean of per-product ratios lets a tiny-commitment
+  // product (e.g. 2/month, trivially swinging to 300%) dominate the number
+  // just as much as the account's real, high-volume product, producing a
+  // headline figure that doesn't reflect actual overall performance.
+  // Reported as "deceiving" (a real 133% that didn't mean what it implied).
+  // Per-product achievement in the expanded table below is still accurate
+  // and stays -- it's the blended-across-products average that was the
+  // problem, not achievement tracking itself.
+  function accountSummary(accountId: string) {
+    return { productCount: skus.filter((s) => s.account_id === accountId).length };
   }
 
   return (
@@ -148,7 +142,7 @@ export function CommittedPanel({
           {visibleAccounts.map((a) => {
             const isOpen = expanded.has(a.id) || accountFilter === a.id;
             const monthCount = eligibleMonthCount(a.commitmentStart);
-            const summary = accountSummary(a.id, monthCount);
+            const summary = accountSummary(a.id);
             const accountSkus = skus.filter((s) => s.account_id === a.id);
             return (
               <div key={a.id} className="overflow-hidden rounded-[4px] border border-border">
@@ -160,7 +154,6 @@ export function CommittedPanel({
                   <span className="text-[13px] font-bold text-ink-soft">{a.label}</span>
                   <span className="flex items-center gap-2">
                     <span className="text-[11px] text-muted">{summary.productCount} products</span>
-                    {achievementBadge(summary.avg)}
                     <span className="text-muted">{isOpen ? "−" : "+"}</span>
                   </span>
                 </button>

@@ -544,6 +544,7 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
   return (
     <AppShell
       ctx="Account Manager"
+      showUserName
       stats={[]}
       maxWidthClass="max-w-[1000px]"
       extraNav={[

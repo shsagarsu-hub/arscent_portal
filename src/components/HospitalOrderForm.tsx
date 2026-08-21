@@ -5,6 +5,13 @@ import { todayISO } from "@/lib/dates";
 import { createOrder } from "@/app/manager/orders/actions";
 import type { OrderType } from "@/lib/supabase/database.types";
 
+function parseEmails(raw: string): string[] {
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
 interface SkuRow {
   id: string;
   name: string;
@@ -77,6 +84,8 @@ export function HospitalOrderForm({
   const [poNumber, setPoNumber] = useState("");
   const [deliveryInstruction, setDeliveryInstruction] = useState("");
   const [comment, setComment] = useState("");
+  const [extraTo, setExtraTo] = useState("");
+  const [cc, setCc] = useState("");
   const [items, setItems] = useState<LineItem[]>([]);
   const [status, setStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [saving, setSaving] = useState(false);
@@ -229,6 +238,8 @@ export function HospitalOrderForm({
         // this is the one place the specific diopter/variant survives.
         notes: i.note ? `${i.officialName} — ${i.note}` : i.officialName,
       })),
+      extraTo: parseEmails(extraTo),
+      cc: parseEmails(cc),
     });
     setSaving(false);
     if (res.success) {
@@ -242,6 +253,8 @@ export function HospitalOrderForm({
       setPoNumber("");
       setDeliveryInstruction("");
       setComment("");
+      setExtraTo("");
+      setCc("");
       setPoFile(null);
       if (poFileRef.current) poFileRef.current.value = "";
       onSubmitted?.();
@@ -340,6 +353,27 @@ export function HospitalOrderForm({
               placeholder="Optional"
               value={comment}
               onChange={(e) => setComment(e.target.value)}
+            />
+          </div>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
+          <div>
+            <label className="field-label">To (additional recipients)</label>
+            <input
+              className="field-input"
+              placeholder="Optional — comma-separated emails"
+              value={extraTo}
+              onChange={(e) => setExtraTo(e.target.value)}
+            />
+          </div>
+          <div>
+            <label className="field-label">Cc</label>
+            <input
+              className="field-input"
+              placeholder="Optional — comma-separated emails"
+              value={cc}
+              onChange={(e) => setCc(e.target.value)}
             />
           </div>
         </div>

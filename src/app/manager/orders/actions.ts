@@ -31,6 +31,8 @@ export interface CreateOrderInput {
   partialShipment: boolean;
   poAttachmentUrl?: string | null;
   lines: OrderLineInput[];
+  extraTo?: string[];
+  cc?: string[];
 }
 
 // Order types a hospital login is allowed to place themselves -- the
@@ -124,6 +126,8 @@ export async function createOrder(input: CreateOrderInput) {
     comment: input.comment,
     createdBy: user.id,
     lines: input.lines,
+    extraTo: input.extraTo,
+    cc: input.cc,
   });
 
   return {
@@ -152,6 +156,8 @@ async function notifyOrderPlaced(input: {
   comment: string;
   createdBy: string;
   lines: OrderLineInput[];
+  extraTo?: string[];
+  cc?: string[];
 }) {
   try {
     const admin = createAdminClient();
@@ -190,6 +196,8 @@ async function notifyOrderPlaced(input: {
       hospitalEmail: emailById.get(input.createdBy) ?? null,
       hospitalName: submitterProfile?.full_name ?? null,
       managerEmails,
+      extraTo: input.extraTo,
+      cc: input.cc,
     });
   } catch (err) {
     console.error("[notifyOrderPlaced] failed:", err);

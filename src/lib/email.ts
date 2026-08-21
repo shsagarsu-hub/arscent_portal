@@ -39,6 +39,8 @@ export interface OrderEmailInput {
   hospitalEmail: string | null;
   hospitalName: string | null;
   managerEmails: string[];
+  extraTo?: string[];
+  cc?: string[];
 }
 
 export interface SendResult {
@@ -56,7 +58,10 @@ export interface SendResult {
  * returned SendResult to know whether it actually went out.
  */
 export async function sendOrderNotification(input: OrderEmailInput): Promise<SendResult> {
-  const recipients = [input.hospitalEmail, ...input.managerEmails].filter((e): e is string => !!e);
+  const recipients = [input.hospitalEmail, ...input.managerEmails, ...(input.extraTo ?? [])].filter(
+    (e): e is string => !!e
+  );
+  const cc = input.cc ?? [];
   const transporter = getTransporter();
 
   if (!transporter) {
@@ -124,10 +129,11 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
       // shared inbox instead of back to whoever actually placed the order.
       replyTo: input.hospitalEmail || undefined,
       to: recipients,
+      cc: cc.length > 0 ? cc : undefined,
       subject: `Order ${input.workOrderNo} — ${input.accountLabel}`,
       html,
     });
-    return { sent: true, recipients };
+    return { sent: true, recipients: [...recipients, ...cc] };
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients };
   }

@@ -75,7 +75,15 @@ export interface FifoAllocation {
 
 export interface FifoAllocationResult {
   allocations: FifoAllocation[];
+  // All in cash terms (what actually landed in the bank) -- leftover is
+  // cash not yet applied to any invoice, gross/tds are informational so the
+  // account manager can see how much of what got cleared was TDS rather
+  // than cash.
   leftover: number;
+  grossApplied: number;
+  tdsApplied: number;
+  utr: string;
+  paymentDate: string;
 }
 
 /**
@@ -91,18 +99,35 @@ export interface FifoAllocationResult {
  * Recomputed entirely server-side from tally_invoice_lines + existing
  * receivable_payments (not trusting client-supplied due amounts) since
  * this moves real money into the books.
+ *
+ * tdsRate (%): hospitals commonly deduct TDS before remitting, so the cash
+ * that lands in the bank is less than what the invoice actually clears --
+ * the shortfall is real (paid to the government on Arscent's behalf), not
+ * still owed. When set, `data.totalAmount` is treated as the actual cash
+ * received and grossed up (amount / (1 - rate/100)) before running FIFO, so
+ * invoices close for their true value instead of hanging open for the
+ * TDS-sized gap forever. Each invoice's stored amount_received is therefore
+ * the gross (cash + TDS) value cleared against it, not raw cash -- this
+ * table isn't used anywhere else in the app as a cash-reconciliation figure
+ * (confirmed via a repo-wide search), so there's no other feature relying
+ * on it meaning pure cash.
  */
 export async function allocatePaymentFifo(
   accountId: string,
-  data: { totalAmount: string; utr: string; paymentDate: string }
+  data: { totalAmount: string; utr: string; paymentDate: string; tdsRate?: string }
 ): Promise<FifoAllocationResult> {
   const userId = await requireManager();
   const admin = createAdminClient();
 
-  let remaining = parseFloat(data.totalAmount);
-  if (!data.totalAmount.trim() || isNaN(remaining) || remaining <= 0) {
+  const cashAmount = parseFloat(data.totalAmount);
+  if (!data.totalAmount.trim() || isNaN(cashAmount) || cashAmount <= 0) {
     throw new Error("Enter a valid amount received.");
   }
+  const tdsRate = data.tdsRate ? parseFloat(data.tdsRate) : 0;
+  if (isNaN(tdsRate) || tdsRate < 0 || tdsRate >= 100) {
+    throw new Error("TDS rate must be a percentage between 0 and 100.");
+  }
+  let remaining = tdsRate > 0 ? cashAmount / (1 - tdsRate / 100) : cashAmount;
   const utr = data.utr.trim();
   if (!utr) throw new Error("UTR is required.");
   if (!data.paymentDate) throw new Error("Payment date is required.");
@@ -170,6 +195,36 @@ export async function allocatePaymentFifo(
     if (insertErr) throw new Error(insertErr.message);
   }
 
+  const grossApplied = allocations.reduce((a, x) => a + x.allocated, 0);
+  const tdsApplied = tdsRate > 0 ? grossApplied * (tdsRate / 100) : 0;
+  // `remaining` is still in gross terms here -- convert back to cash so the
+  // leftover reads as "cash left in hand", the figure the account manager
+  // is actually thinking in.
+  const leftover = tdsRate > 0 ? remaining * (1 - tdsRate / 100) : remaining;
+
   revalidatePath("/manager");
-  return { allocations, leftover: remaining };
+  return { allocations, leftover, grossApplied, tdsApplied, utr, paymentDate: data.paymentDate };
+}
+
+/**
+ * Undoes one lump-sum receipt in full -- every receivable_payments row this
+ * exact allocation created, identified by (utr, payment_date) since that
+ * pair is written identically across every invoice one allocatePaymentFifo
+ * call touches and is a real bank-transaction reference in practice (two
+ * genuinely different receipts essentially never share both). Also covers
+ * undoing a single-invoice closeReceivable payment, since that writes the
+ * same two fields.
+ */
+export async function deleteAllocation(utr: string, paymentDate: string) {
+  await requireManager();
+  const admin = createAdminClient();
+
+  const cleanUtr = utr.trim();
+  if (!cleanUtr) throw new Error("UTR is required.");
+  if (!paymentDate) throw new Error("Payment date is required.");
+
+  const { error } = await admin.from("receivable_payments").delete().eq("utr", cleanUtr).eq("payment_date", paymentDate);
+  if (error) throw new Error(error.message);
+
+  revalidatePath("/manager");
 }

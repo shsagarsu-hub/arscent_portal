@@ -3,7 +3,13 @@
 import { Fragment, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
-import { closeReceivable, reopenReceivable, allocatePaymentFifo, type FifoAllocationResult } from "@/app/manager/receivables/actions";
+import {
+  closeReceivable,
+  reopenReceivable,
+  allocatePaymentFifo,
+  deleteAllocation,
+  type FifoAllocationResult,
+} from "@/app/manager/receivables/actions";
 import { ExportButton } from "./ExportButton";
 
 interface InvoiceLineRow {
@@ -74,6 +80,20 @@ function todayIso() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+
+// Common TDS rates a hospital might deduct before remitting -- not a
+// statement of which section applies to Arscent specifically, just quick
+// presets so the account manager isn't typing a rate from memory each time.
+// "Custom" reveals a free-entry field for anything else.
+const TDS_PRESETS: { label: string; value: string }[] = [
+  { label: "No TDS (0%)", value: "0" },
+  { label: "0.1% — Sec 194Q (goods)", value: "0.1" },
+  { label: "1% — Sec 194C (individual/HUF)", value: "1" },
+  { label: "2% — Sec 194C (company) / 194-I", value: "2" },
+  { label: "5%", value: "5" },
+  { label: "10% — Sec 194J (professional fees)", value: "10" },
+  { label: "Custom…", value: "custom" },
+];
 
 function CloseReceivableForm({
   invoiceNo,
@@ -157,9 +177,14 @@ function FifoPaymentForm({
   const [amount, setAmount] = useState("");
   const [utr, setUtr] = useState("");
   const [date, setDate] = useState(todayIso());
+  const [tdsPreset, setTdsPreset] = useState("0");
+  const [tdsCustom, setTdsCustom] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<FifoAllocationResult | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
+  const tdsRate = tdsPreset === "custom" ? tdsCustom : tdsPreset;
 
   async function submit() {
     if (!accountId) {
@@ -170,7 +195,7 @@ function FifoPaymentForm({
     setError(null);
     setResult(null);
     try {
-      const res = await allocatePaymentFifo(accountId, { totalAmount: amount, utr, paymentDate: date });
+      const res = await allocatePaymentFifo(accountId, { totalAmount: amount, utr, paymentDate: date, tdsRate });
       setResult(res);
       setAmount("");
       setUtr("");
@@ -179,6 +204,21 @@ function FifoPaymentForm({
       setError(err instanceof Error ? err.message : "Failed to record payment.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function undo() {
+    if (!result) return;
+    if (!confirm(`Delete this allocation? This removes the payment recorded against all ${result.allocations.length} invoice(s) it touched.`)) return;
+    setDeleting(true);
+    try {
+      await deleteAllocation(result.utr, result.paymentDate);
+      setResult(null);
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete allocation.");
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -215,15 +255,41 @@ function FifoPaymentForm({
               </select>
             </div>
             <div>
-              <label className="field-label">Amount received</label>
+              <label className="field-label">Amount received (cash, bank credit)</label>
               <input
                 type="number"
                 step="0.01"
-                className="field-input !py-1 w-[130px] text-[12.5px]"
+                className="field-input !py-1 w-[150px] text-[12.5px]"
                 value={amount}
                 onChange={(e) => setAmount(e.target.value)}
               />
             </div>
+            <div>
+              <label className="field-label">TDS deducted</label>
+              <select
+                className="field-input !py-1 w-[190px] text-[12.5px]"
+                value={tdsPreset}
+                onChange={(e) => setTdsPreset(e.target.value)}
+              >
+                {TDS_PRESETS.map((p) => (
+                  <option key={p.value} value={p.value}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {tdsPreset === "custom" && (
+              <div>
+                <label className="field-label">Rate (%)</label>
+                <input
+                  type="number"
+                  step="0.01"
+                  className="field-input !py-1 w-[90px] text-[12.5px]"
+                  value={tdsCustom}
+                  onChange={(e) => setTdsCustom(e.target.value)}
+                />
+              </div>
+            )}
             <div>
               <label className="field-label">UTR</label>
               <input className="field-input !py-1 w-[150px] text-[12.5px]" value={utr} onChange={(e) => setUtr(e.target.value)} />
@@ -241,32 +307,53 @@ function FifoPaymentForm({
               {saving ? "Allocating…" : "Allocate"}
             </button>
           </div>
+          {parseFloat(tdsRate || "0") > 0 && (
+            <p className="mt-1.5 text-[11px] text-muted">
+              Invoices will be cleared against the grossed-up value (cash + TDS) so the TDS-withheld portion doesn&apos;t
+              stay stuck in &quot;due&quot; forever.
+            </p>
+          )}
           {error && <div className="mt-2 text-[11px] font-semibold text-bad-fg">{error}</div>}
           {result && (
             <div className="mt-3 rounded-[6px] border border-border bg-app/60 p-2.5">
               {result.allocations.length === 0 ? (
                 <p className="text-[11.5px] text-muted">No open invoices to apply this against.</p>
               ) : (
-                <table className="u-table">
-                  <thead>
-                    <tr>
-                      <th>Invoice</th>
-                      <th>Invoice date</th>
-                      <th className="text-right">Allocated</th>
-                      <th className="text-right">Remaining after</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {result.allocations.map((a) => (
-                      <tr key={a.invoiceNo}>
-                        <td className="whitespace-nowrap font-semibold text-ink">{a.invoiceNo}</td>
-                        <td className="text-muted">{a.invoiceDate}</td>
-                        <td className="text-right text-good-fg">{inr(a.allocated)}</td>
-                        <td className="text-right text-muted">{a.remainingDueAfter > 0 ? inr(a.remainingDueAfter) : "closed"}</td>
+                <>
+                  <table className="u-table">
+                    <thead>
+                      <tr>
+                        <th>Invoice</th>
+                        <th>Invoice date</th>
+                        <th className="text-right">Allocated (gross)</th>
+                        <th className="text-right">Remaining after</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody>
+                      {result.allocations.map((a) => (
+                        <tr key={a.invoiceNo}>
+                          <td className="whitespace-nowrap font-semibold text-ink">{a.invoiceNo}</td>
+                          <td className="text-muted">{a.invoiceDate}</td>
+                          <td className="text-right text-good-fg">{inr(a.allocated)}</td>
+                          <td className="text-right text-muted">{a.remainingDueAfter > 0 ? inr(a.remainingDueAfter) : "closed"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {result.tdsApplied > 0.01 && (
+                    <p className="mt-2 text-[11.5px] text-muted">
+                      Of {inr(result.grossApplied)} cleared, {inr(result.tdsApplied)} was TDS (not cash).
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    className="btn-outline-danger mt-2 !px-2.5 !py-1 text-[11px]"
+                    disabled={deleting}
+                    onClick={undo}
+                  >
+                    {deleting ? "Deleting…" : "Delete this allocation"}
+                  </button>
+                </>
               )}
               {result.leftover > 0.01 && (
                 <p className="mt-2 text-[11.5px] font-semibold text-watch-fg">
@@ -299,6 +386,7 @@ export function ReceivablesPanel() {
   const [accountFilter, setAccountFilter] = useState("");
   const [showReceived, setShowReceived] = useState(false);
   const [reopeningInvoice, setReopeningInvoice] = useState<string | null>(null);
+  const [deletingBatch, setDeletingBatch] = useState<string | null>(null);
 
   async function load() {
     const [{ data: lines }, { data: accountRows }, { data: payments }] = await Promise.all([
@@ -518,35 +606,71 @@ export function ReceivablesPanel() {
             </thead>
             <tbody>
               {/* One row per payment, not per invoice -- a partially-paid
-                  invoice (see allocatePaymentFifo) can carry more than one. */}
-              {received
-                .flatMap((r) => r.payments.map((p) => ({ r, p })))
-                .sort((a, b) => a.r.invoiceNo.localeCompare(b.r.invoiceNo) || a.p.payment_date.localeCompare(b.p.payment_date))
-                .map(({ r, p }, i) => (
-                <tr key={`${r.invoiceNo}-${i}`}>
-                  <td className="whitespace-nowrap font-semibold text-ink">{r.invoiceNo}</td>
-                  <td className="text-muted">{r.accountLabel}</td>
-                  <td className="text-right text-good-fg">{inr(p.amount_received)}</td>
-                  <td className="font-mono text-[11.5px] text-muted">{p.utr}</td>
-                  <td className="text-muted">{p.payment_date}</td>
-                  <td>
-                    <button
-                      type="button"
-                      className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
-                      disabled={reopeningInvoice === r.invoiceNo}
-                      onClick={async () => {
-                        if (!confirm(`Reopen ${r.invoiceNo}? This removes all recorded payments for this invoice.`)) return;
-                        setReopeningInvoice(r.invoiceNo);
-                        await reopenReceivable(r.invoiceNo);
-                        setReopeningInvoice(null);
-                        void load();
-                      }}
-                    >
-                      {reopeningInvoice === r.invoiceNo ? "Reopening…" : "Reopen"}
-                    </button>
-                  </td>
-                </tr>
-              ))}
+                  invoice (see allocatePaymentFifo) can carry more than one.
+                  Rows sharing (utr, payment_date) came from one lump-sum
+                  allocation call -- grouped so it can be undone as a whole
+                  instead of one invoice at a time. */}
+              {(() => {
+                const rows = received
+                  .flatMap((r) => r.payments.map((p) => ({ r, p })))
+                  .sort((a, b) => `${a.p.utr}__${a.p.payment_date}`.localeCompare(`${b.p.utr}__${b.p.payment_date}`) || a.r.invoiceNo.localeCompare(b.r.invoiceNo));
+                const batchKey = (p: PaymentRow) => `${p.utr}__${p.payment_date}`;
+                const batchSizes = new Map<string, number>();
+                rows.forEach(({ p }) => batchSizes.set(batchKey(p), (batchSizes.get(batchKey(p)) ?? 0) + 1));
+
+                return rows.map(({ r, p }, i) => {
+                  const key = batchKey(p);
+                  const batchSize = batchSizes.get(key) ?? 1;
+                  const isBatch = batchSize > 1;
+                  return (
+                    <tr key={`${r.invoiceNo}-${i}`}>
+                      <td className="whitespace-nowrap font-semibold text-ink">{r.invoiceNo}</td>
+                      <td className="text-muted">{r.accountLabel}</td>
+                      <td className="text-right text-good-fg">{inr(p.amount_received)}</td>
+                      <td className="font-mono text-[11.5px] text-muted">{p.utr}</td>
+                      <td className="text-muted">{p.payment_date}</td>
+                      <td>
+                        {isBatch ? (
+                          <button
+                            type="button"
+                            className="btn-outline-danger !px-2.5 !py-1 text-[11px]"
+                            disabled={deletingBatch === key}
+                            onClick={async () => {
+                              if (
+                                !confirm(
+                                  `Delete this allocation? This removes the payment recorded against all ${batchSize} invoices it covered (UTR ${p.utr}, ${p.payment_date}).`
+                                )
+                              )
+                                return;
+                              setDeletingBatch(key);
+                              await deleteAllocation(p.utr, p.payment_date);
+                              setDeletingBatch(null);
+                              void load();
+                            }}
+                          >
+                            {deletingBatch === key ? "Deleting…" : `Delete allocation (${batchSize})`}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
+                            disabled={reopeningInvoice === r.invoiceNo}
+                            onClick={async () => {
+                              if (!confirm(`Reopen ${r.invoiceNo}? This removes all recorded payments for this invoice.`)) return;
+                              setReopeningInvoice(r.invoiceNo);
+                              await reopenReceivable(r.invoiceNo);
+                              setReopeningInvoice(null);
+                              void load();
+                            }}
+                          >
+                            {reopeningInvoice === r.invoiceNo ? "Reopening…" : "Reopen"}
+                          </button>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                });
+              })()}
             </tbody>
           </table>
         </div>

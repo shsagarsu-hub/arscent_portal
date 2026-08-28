@@ -68,6 +68,42 @@ interface LocationJoinRow {
   order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
 }
 
+/** One row per item currently on hand at one specific hospital location --
+ * "on hand" here means sent minus returned; there's no per-item consumption
+ * source at this granularity (billing_requests, the real record of what got
+ * used, is tracked per SKU family, not per exact lens power), so this reads
+ * right today (nothing has been consumed yet anywhere) but would need that
+ * netted in once real usage exists against these locations. */
+interface LocationStockLine {
+  itemName: string;
+  sent: number;
+  returned: number;
+  balance: number;
+}
+
+interface LocationGroup {
+  key: string; // `${accountId}-${locationName}`
+  accountLabel: string;
+  locationName: string;
+  lines: LocationStockLine[];
+  totalBalance: number;
+}
+
+/** Raw shape of the query LocationGroup is built from -- every account+item
+ * this session ever sent to a hospital, with the location resolved via the
+ * same order_line_id -> orders -> account_locations join as the per-item
+ * breakdown, falling back to the account itself (no location) for an ad-hoc
+ * "Sent to Hospital" logged directly in Inventory rather than through an
+ * order. */
+interface LocationStockJoinRow {
+  qty: number;
+  category: MovementCategory;
+  hospital_account_id: string | null;
+  item_master: { name: string } | null;
+  accounts: { label: string } | null;
+  order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
+}
+
 interface MovementRow {
   id: string;
   category: MovementCategory;
@@ -197,6 +233,9 @@ export function InventoryPanel() {
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
   const [warehouse, setWarehouse] = useState<StockBalanceRow[] | null>(null);
   const [consignment, setConsignment] = useState<ConsignmentBalanceRow[] | null>(null);
+  const [locationGroups, setLocationGroups] = useState<LocationGroup[] | null>(null);
+  const [openLocationKey, setOpenLocationKey] = useState<string | null>(null);
+  const [locationStockOpen, setLocationStockOpen] = useState(false);
   const [movements, setMovements] = useState<MovementRow[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -287,6 +326,7 @@ export function InventoryPanel() {
       { data: accountRows, error: accountsErr },
       { data: warehouseRows, error: warehouseErr },
       { data: consignmentRows, error: consignmentErr },
+      { data: locationJoinRows, error: locationErr },
     ] = await Promise.all([
       supabase.from("accounts").select("id, label").order("label"),
       // Only items with a non-zero total — this table can have thousands of
@@ -297,6 +337,18 @@ export function InventoryPanel() {
       // hiding.
       supabase.from("stock_balance").select("*").neq("balance", 0).order("name"),
       supabase.from("consignment_balance").select("*").order("account_label"),
+      // Same location join as the per-item "By location" breakdown, but
+      // fetched once up front and regrouped location-first -- "what's on
+      // the shelf at this specific branch" rather than "which branches have
+      // this item".
+      supabase
+        .from("stock_movements")
+        .select(
+          "qty, category, hospital_account_id, item_master(name), accounts:hospital_account_id(label), order_lines(orders(account_locations(name)))"
+        )
+        .in("category", ["dc_out", "dc_return_in"])
+        .not("hospital_account_id", "is", null)
+        .returns<LocationStockJoinRow[]>(),
     ]);
     setAccounts(accountRows ?? []);
     setWarehouse(warehouseRows ?? []);
@@ -306,7 +358,33 @@ export function InventoryPanel() {
     setConsignmentBatchDetail({});
     setConsignmentLocationDetail({});
     setExpandedConsignmentKey(null);
-    const firstError = accountsErr || warehouseErr || consignmentErr;
+
+    const groups = new Map<string, { accountLabel: string; locationName: string; items: Map<string, LocationStockLine> }>();
+    (locationJoinRows ?? []).forEach((r) => {
+      const accountLabel = r.accounts?.label ?? "—";
+      const locationName = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
+      const groupKey = `${r.hospital_account_id}-${locationName}`;
+      const group = groups.get(groupKey) ?? { accountLabel, locationName, items: new Map<string, LocationStockLine>() };
+      const itemName = r.item_master?.name ?? "—";
+      const line = group.items.get(itemName) ?? { itemName, sent: 0, returned: 0, balance: 0 };
+      if (r.category === "dc_out") line.sent += r.qty;
+      else line.returned += r.qty;
+      line.balance = line.sent - line.returned;
+      group.items.set(itemName, line);
+      groups.set(groupKey, group);
+    });
+    const builtGroups: LocationGroup[] = Array.from(groups.entries())
+      .map(([key, g]) => {
+        const lines = Array.from(g.items.values())
+          .filter((l) => l.balance !== 0)
+          .sort((a, b) => a.itemName.localeCompare(b.itemName));
+        return { key, accountLabel: g.accountLabel, locationName: g.locationName, lines, totalBalance: lines.reduce((a, l) => a + l.balance, 0) };
+      })
+      .filter((g) => g.lines.length > 0)
+      .sort((a, b) => a.accountLabel.localeCompare(b.accountLabel) || a.locationName.localeCompare(b.locationName));
+    setLocationGroups(builtGroups);
+
+    const firstError = accountsErr || warehouseErr || consignmentErr || locationErr;
     setLoadError(firstError ? firstError.message : null);
   }, [supabase]);
 
@@ -1089,6 +1167,78 @@ export function InventoryPanel() {
           </>
         )}
         </div>
+        )}
+      </div>
+
+      <div className="card">
+        <button
+          type="button"
+          className="flex w-full items-center justify-between text-left"
+          onClick={() => setLocationStockOpen((o) => !o)}
+        >
+          <div>
+            <h3 className="text-[14.5px] font-extrabold text-ink">Consignment stock by location</h3>
+          </div>
+          <span className="ml-3 shrink-0 text-lg text-muted">{locationStockOpen ? "−" : "+"}</span>
+        </button>
+        {locationStockOpen && (
+          <div className="mt-3.5">
+            {locationGroups === null ? (
+              <Loading />
+            ) : locationGroups.length === 0 ? (
+              <Empty title="Nothing on consignment yet" body="DC an order to a hospital location to start tracking it here." />
+            ) : (
+              <div className="space-y-2">
+                {locationGroups.map((g) => {
+                  const isOpen = openLocationKey === g.key;
+                  return (
+                    <div key={g.key} className="rounded-[6px] border border-border">
+                      <button
+                        type="button"
+                        className="flex w-full items-center justify-between px-3 py-2.5 text-left"
+                        onClick={() => setOpenLocationKey(isOpen ? null : g.key)}
+                      >
+                        <span className="text-[12.5px] font-bold text-ink">
+                          {g.accountLabel}
+                          {g.locationName !== "Not location-tagged" && (
+                            <span className="font-normal text-muted"> — {g.locationName}</span>
+                          )}
+                        </span>
+                        <span className="flex items-center gap-2 text-[11.5px] text-muted">
+                          {g.lines.length} item{g.lines.length === 1 ? "" : "s"} · {g.totalBalance} unit{g.totalBalance === 1 ? "" : "s"}
+                          <span className="text-lg leading-none">{isOpen ? "−" : "+"}</span>
+                        </span>
+                      </button>
+                      {isOpen && (
+                        <div className="overflow-x-auto border-t border-border">
+                          <table className="u-table">
+                            <thead>
+                              <tr>
+                                <th>Item</th>
+                                <th>Sent</th>
+                                <th>Returned</th>
+                                <th>On hand</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {g.lines.map((l) => (
+                                <tr key={l.itemName}>
+                                  <td className="whitespace-nowrap">{l.itemName}</td>
+                                  <td>{l.sent}</td>
+                                  <td>{l.returned}</td>
+                                  <td className={`font-bold ${l.balance < 0 ? "text-bad-fg" : ""}`}>{l.balance}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         )}
       </div>
 

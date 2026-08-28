@@ -1,5 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
-import { parsePurchaseExcel } from "@/lib/tally/parsePurchaseExcel";
+import { parsePurchaseInvoicePdf } from "@/lib/tally/parsePurchaseInvoicePdf";
 
 const MAX_BYTES = 10 * 1024 * 1024;
 
@@ -22,8 +22,8 @@ export async function POST(request: Request) {
   if (!(file instanceof File)) {
     return Response.json({ error: "No file uploaded." }, { status: 400 });
   }
-  if (!/\.(xlsx|xlsm)$/i.test(file.name)) {
-    return Response.json({ error: "That's not an Excel file (.xlsx or .xlsm)." }, { status: 400 });
+  if (!/\.pdf$/i.test(file.name)) {
+    return Response.json({ error: "That's not a PDF file." }, { status: 400 });
   }
   if (file.size > MAX_BYTES) {
     return Response.json({ error: "File is too large (10MB max)." }, { status: 400 });
@@ -32,10 +32,10 @@ export async function POST(request: Request) {
   const buffer = Buffer.from(await file.arrayBuffer());
 
   try {
-    const result = await parsePurchaseExcel(buffer);
-    if (result.rows.length === 0) {
+    const result = await parsePurchaseInvoicePdf(buffer);
+    if (result.lines.length === 0) {
       return Response.json(
-        { error: "Couldn't find any batch rows in this file.", warnings: result.warnings },
+        { error: "Couldn't find any line items in this PDF.", warnings: result.warnings },
         { status: 422 }
       );
     }

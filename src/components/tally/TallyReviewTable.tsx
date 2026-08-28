@@ -6,7 +6,7 @@ import { createClient } from "@/lib/supabase/client";
 import { AppShell, Empty } from "@/components/AppShell";
 import { BuildingIcon, DashboardIcon, UploadIcon } from "@/components/icons";
 import { matchAccount, matchCatalogItem, matchSku, stripPowerSpecs } from "@/lib/tally/matching";
-import { PurchaseImportPanel } from "./PurchaseImportPanel";
+import { PurchaseInvoiceImportPanel } from "./PurchaseInvoiceImportPanel";
 import { ImportedInvoicesList } from "./ImportedInvoicesList";
 
 interface AccountRow {
@@ -740,8 +740,9 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
         {importError && <span className="text-xs font-semibold text-bad-fg">Import failed: {importError}</span>}
       </div>
 
-      <h2 className="mt-8 mb-3 text-[15px] font-extrabold text-ink">Purchases (Excel)</h2>
-      <PurchaseImportPanel />
+      <div className="mt-8">
+        <PurchaseInvoiceImportPanel />
+      </div>
             </>
           ),
         },

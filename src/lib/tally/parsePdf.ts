@@ -25,7 +25,7 @@ import "server-only";
 // execution reach it. Removed entirely; pdf-parse's own default worker
 // resolution has worked in every test since.)
 let pdfParseModule: typeof import("pdf-parse") | null = null;
-async function loadPdfParse() {
+export async function loadPdfParse() {
   if (pdfParseModule) return pdfParseModule;
   if (!("DOMMatrix" in globalThis)) {
     const { default: CSSMatrix } = await import("dommatrix");

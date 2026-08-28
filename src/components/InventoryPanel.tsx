@@ -50,6 +50,24 @@ interface ConsignmentBalanceByBatchRow extends ConsignmentBalanceRow {
   batch_number: string;
 }
 
+interface ConsignmentLocationRow {
+  name: string;
+  sent: number;
+  returned: number;
+}
+
+/** Raw shape of the nested stock_movements query used to derive a
+ * per-location split -- consignment_balance itself has no location column
+ * (stock_movements doesn't carry one), but every dc_out/dc_return_in row
+ * created through a real order does carry order_line_id, and that order
+ * always has a location_id, so the split is reachable by joining through it
+ * instead of needing a schema change. */
+interface LocationJoinRow {
+  qty: number;
+  category: MovementCategory;
+  order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
+}
+
 interface MovementRow {
   id: string;
   category: MovementCategory;
@@ -209,6 +227,7 @@ export function InventoryPanel() {
   // hospitals at once.
   const [expandedConsignmentKey, setExpandedConsignmentKey] = useState<string | null>(null);
   const [consignmentBatchDetail, setConsignmentBatchDetail] = useState<Record<string, ConsignmentBalanceByBatchRow[]>>({});
+  const [consignmentLocationDetail, setConsignmentLocationDetail] = useState<Record<string, ConsignmentLocationRow[]>>({});
   const [loadingConsignmentKey, setLoadingConsignmentKey] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -285,6 +304,7 @@ export function InventoryPanel() {
     setBatchDetail({});
     setExpandedItemId(null);
     setConsignmentBatchDetail({});
+    setConsignmentLocationDetail({});
     setExpandedConsignmentKey(null);
     const firstError = accountsErr || warehouseErr || consignmentErr;
     setLoadError(firstError ? firstError.message : null);
@@ -336,14 +356,41 @@ export function InventoryPanel() {
     setExpandedConsignmentKey(key);
     if (consignmentBatchDetail[key]) return;
     setLoadingConsignmentKey(key);
-    const { data } = await supabase
-      .from("consignment_balance_by_batch")
-      .select("*")
-      .eq("account_id", accountId)
-      .eq("item_id", itemId)
-      .order("batch_number")
-      .returns<ConsignmentBalanceByBatchRow[]>();
+    const [{ data }, { data: locationRows }] = await Promise.all([
+      supabase
+        .from("consignment_balance_by_batch")
+        .select("*")
+        .eq("account_id", accountId)
+        .eq("item_id", itemId)
+        .order("batch_number")
+        .returns<ConsignmentBalanceByBatchRow[]>(),
+      // stock_movements has no location column, so the split is reached by
+      // joining through order_line_id -> orders.location_id instead (every
+      // dc_out/dc_return_in row created via a real order carries it). Rows
+      // with no order_line_id (an ad-hoc "Sent to Hospital" logged directly
+      // in Inventory, not through an order) fall into "Not location-tagged".
+      supabase
+        .from("stock_movements")
+        .select("qty, category, order_lines(orders(account_locations(name)))")
+        .eq("hospital_account_id", accountId)
+        .eq("item_id", itemId)
+        .in("category", ["dc_out", "dc_return_in"])
+        .returns<LocationJoinRow[]>(),
+    ]);
     setConsignmentBatchDetail((prev) => ({ ...prev, [key]: data ?? [] }));
+
+    const byLocation = new Map<string, ConsignmentLocationRow>();
+    (locationRows ?? []).forEach((r) => {
+      const name = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
+      const row = byLocation.get(name) ?? { name, sent: 0, returned: 0 };
+      if (r.category === "dc_out") row.sent += r.qty;
+      else row.returned += r.qty;
+      byLocation.set(name, row);
+    });
+    setConsignmentLocationDetail((prev) => ({
+      ...prev,
+      [key]: Array.from(byLocation.values()).sort((a, b) => a.name.localeCompare(b.name)),
+    }));
     setLoadingConsignmentKey(null);
   }
 
@@ -1099,31 +1146,58 @@ export function InventoryPanel() {
                             <div className="bg-[#f7f9fd] px-4 py-3">
                               {loadingConsignmentKey === key ? (
                                 <Loading />
-                              ) : (consignmentBatchDetail[key]?.length ?? 0) === 0 ? (
-                                <p className="text-xs text-muted">No batch-tagged movements for this item at this hospital.</p>
                               ) : (
-                                <table className="u-table">
-                                  <thead>
-                                    <tr>
-                                      <th>Batch</th>
-                                      <th>Sent</th>
-                                      <th>Returned</th>
-                                      <th>Consumed</th>
-                                      <th>Balance</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody>
-                                    {consignmentBatchDetail[key]!.map((b) => (
-                                      <tr key={b.batch_number}>
-                                        <td className="whitespace-nowrap">{b.batch_number}</td>
-                                        <td>{b.sent}</td>
-                                        <td>{b.returned}</td>
-                                        <td>{b.consumed}</td>
-                                        <td className={`font-bold ${b.balance < 0 ? "text-bad-fg" : ""}`}>{b.balance}</td>
-                                      </tr>
-                                    ))}
-                                  </tbody>
-                                </table>
+                                <>
+                                  {(consignmentLocationDetail[key]?.length ?? 0) > 1 && (
+                                    <div className="mb-3">
+                                      <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-muted">By location</p>
+                                      <table className="u-table">
+                                        <thead>
+                                          <tr>
+                                            <th>Location</th>
+                                            <th>Sent</th>
+                                            <th>Returned</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {consignmentLocationDetail[key]!.map((l) => (
+                                            <tr key={l.name}>
+                                              <td className="whitespace-nowrap">{l.name}</td>
+                                              <td>{l.sent}</td>
+                                              <td>{l.returned}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  )}
+                                  {(consignmentBatchDetail[key]?.length ?? 0) === 0 ? (
+                                    <p className="text-xs text-muted">No batch-tagged movements for this item at this hospital.</p>
+                                  ) : (
+                                    <table className="u-table">
+                                      <thead>
+                                        <tr>
+                                          <th>Batch</th>
+                                          <th>Sent</th>
+                                          <th>Returned</th>
+                                          <th>Consumed</th>
+                                          <th>Balance</th>
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {consignmentBatchDetail[key]!.map((b) => (
+                                          <tr key={b.batch_number}>
+                                            <td className="whitespace-nowrap">{b.batch_number}</td>
+                                            <td>{b.sent}</td>
+                                            <td>{b.returned}</td>
+                                            <td>{b.consumed}</td>
+                                            <td className={`font-bold ${b.balance < 0 ? "text-bad-fg" : ""}`}>{b.balance}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                  )}
+                                </>
                               )}
                             </div>
                           </td>

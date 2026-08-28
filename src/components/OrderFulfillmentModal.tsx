@@ -15,7 +15,13 @@ interface BatchOption {
 interface LineState {
   itemMasterId: string;
   itemName: string;
-  batchNumber: string;
+  // One batch_number per physical unit -- purchase imports write a unique
+  // batch_number per serial (qty always 1 per stock_movements row), so a
+  // line with qty > 1 needs that many distinct batches selected, not one
+  // batch carrying the whole qty. Defaults to the qty earliest-expiry
+  // batches (batchOptions already arrives sorted that way) but stays
+  // editable in case the manager wants a different serial to ship.
+  selectedBatches: string[];
   warehouseBalance: number | null;
   checkingBalance: boolean;
   batchOptions: BatchOption[] | null;
@@ -128,21 +134,33 @@ export function OrderFulfillmentModal({
     Object.fromEntries(
       order.order_lines.map((l) => [
         l.id,
-        { itemMasterId: "", itemName: "", batchNumber: "", warehouseBalance: null, checkingBalance: false, batchOptions: null, loadingBatches: false },
+        { itemMasterId: "", itemName: "", selectedBatches: [], warehouseBalance: null, checkingBalance: false, batchOptions: null, loadingBatches: false },
       ])
     )
   );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const allReady = order.order_lines.every((l) => lines[l.id]?.itemMasterId && lines[l.id]?.batchNumber.trim());
+  const allReady = order.order_lines.every((l) => lines[l.id]?.itemMasterId && lines[l.id]?.selectedBatches.length === l.qty);
 
   function updateLine(lineId: string, patch: Partial<LineState>) {
     setLines((prev) => ({ ...prev, [lineId]: { ...prev[lineId], ...patch } }));
   }
 
-  async function pickItem(lineId: string, itemMasterId: string, itemName: string) {
-    updateLine(lineId, { itemMasterId, itemName, warehouseBalance: null, batchNumber: "", batchOptions: null });
+  function toggleBatch(lineId: string, batchNumber: string, qty: number) {
+    setLines((prev) => {
+      const cur = prev[lineId].selectedBatches;
+      const next = cur.includes(batchNumber)
+        ? cur.filter((b) => b !== batchNumber)
+        : cur.length < qty
+          ? [...cur, batchNumber]
+          : cur; // already have enough serials selected -- ignore further picks until one is unchecked
+      return { ...prev, [lineId]: { ...prev[lineId], selectedBatches: next } };
+    });
+  }
+
+  async function pickItem(lineId: string, itemMasterId: string, itemName: string, qty: number) {
+    updateLine(lineId, { itemMasterId, itemName, warehouseBalance: null, selectedBatches: [], batchOptions: null });
     if (!itemMasterId) return;
     updateLine(lineId, { checkingBalance: true, loadingBatches: true });
     const [{ data: balanceRow }, { data: batchRows }] = await Promise.all([
@@ -160,11 +178,16 @@ export function OrderFulfillmentModal({
         .order("expiry_date", { ascending: true, nullsFirst: false })
         .returns<BatchOption[]>(),
     ]);
+    const options = batchRows ?? [];
+    // Every purchase-in batch here carries qty 1 (one row per serial), so
+    // pre-select the qty earliest-expiry serials as a FEFO default -- the
+    // manager can still swap individual ones before submitting.
     updateLine(lineId, {
       warehouseBalance: balanceRow?.balance ?? 0,
       checkingBalance: false,
-      batchOptions: batchRows ?? [],
+      batchOptions: options,
       loadingBatches: false,
+      selectedBatches: options.slice(0, qty).map((b) => b.batch_number),
     });
   }
 
@@ -182,15 +205,22 @@ export function OrderFulfillmentModal({
 
     const category: MovementCategory = mode === "dc" ? "dc_out" : "sale_out";
     const noteLabel = mode === "dc" ? "DC" : "Invoice";
-    const movements = order.order_lines.map((l) => ({
-      item_id: lines[l.id].itemMasterId,
-      category,
-      qty: l.qty,
-      hospital_account_id: mode === "dc" ? order.account_id : null,
-      batch_number: lines[l.id].batchNumber.trim(),
-      order_line_id: l.id,
-      notes: `${noteLabel} ${refNumber.trim()} — order line ${l.id}`,
-    }));
+    // One stock_movements row per selected serial (qty always 1) rather than
+    // one row carrying the line's whole qty against a single batch_number --
+    // each batch here IS one physical unit, so lumping qty onto one serial
+    // would falsely zero out that one serial while leaving the other real
+    // units still marked as sitting in the warehouse.
+    const movements = order.order_lines.flatMap((l) =>
+      lines[l.id].selectedBatches.map((batch) => ({
+        item_id: lines[l.id].itemMasterId,
+        category,
+        qty: 1,
+        hospital_account_id: mode === "dc" ? order.account_id : null,
+        batch_number: batch,
+        order_line_id: l.id,
+        notes: `${noteLabel} ${refNumber.trim()} — order line ${l.id}`,
+      }))
+    );
 
     const { error: moveErr } = await supabase.from("stock_movements").insert(movements);
     if (moveErr) {
@@ -242,7 +272,8 @@ export function OrderFulfillmentModal({
         <div className="mb-4 space-y-3">
           {order.order_lines.map((l) => {
             const state = lines[l.id];
-            const short = state.warehouseBalance !== null && state.warehouseBalance < l.qty;
+            const availableSerials = state.batchOptions?.length ?? 0;
+            const short = state.batchOptions !== null && availableSerials < l.qty;
             return (
               <div key={l.id} className="rounded-[6px] border border-border p-3">
                 <div className="mb-2 flex items-start justify-between gap-2">
@@ -251,42 +282,46 @@ export function OrderFulfillmentModal({
                   </div>
                 </div>
                 {l.notes && <p className="mb-2 text-[11px] text-muted">{l.notes}</p>}
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <ItemPicker
-                    itemId={state.itemMasterId}
-                    itemName={state.itemName}
-                    onSelect={(id, name) => void pickItem(l.id, id, name)}
-                  />
-                  <select
-                    className="field-input !py-1 text-[12px]"
-                    value={state.batchNumber}
-                    onChange={(e) => updateLine(l.id, { batchNumber: e.target.value })}
-                    disabled={!state.itemMasterId || state.loadingBatches}
-                  >
-                    <option value="">
-                      {!state.itemMasterId
-                        ? "Pick an item first"
-                        : state.loadingBatches
-                          ? "Loading batches…"
-                          : state.batchOptions && state.batchOptions.length === 0
-                            ? "No batches in warehouse stock"
-                            : "Select batch…"}
-                    </option>
-                    {(state.batchOptions ?? []).map((b) => (
-                      <option key={b.batch_number} value={b.batch_number}>
-                        {b.batch_number} — {b.balance} in stock
-                        {b.expiry_date ? ` · exp ${b.expiry_date}` : ""}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <ItemPicker
+                  itemId={state.itemMasterId}
+                  itemName={state.itemName}
+                  onSelect={(id, name) => void pickItem(l.id, id, name, l.qty)}
+                />
+                {state.itemMasterId && (
+                  <div className="mt-2">
+                    <p className="mb-1 text-[11px] font-semibold text-ink-soft">
+                      Serials shipping ({state.selectedBatches.length} of {l.qty} selected)
+                    </p>
+                    {state.loadingBatches ? (
+                      <p className="text-[11px] text-muted">Loading batches…</p>
+                    ) : availableSerials === 0 ? (
+                      <p className="text-[11px] font-semibold text-bad-fg">No serials in warehouse stock for this item.</p>
+                    ) : (
+                      <div className="max-h-40 overflow-y-auto rounded-[4px] border border-border">
+                        {(state.batchOptions ?? []).map((b) => {
+                          const checked = state.selectedBatches.includes(b.batch_number);
+                          return (
+                            <label
+                              key={b.batch_number}
+                              className="flex cursor-pointer items-center gap-2 border-b border-border px-2 py-1 text-[11.5px] last:border-b-0 hover:bg-cream"
+                            >
+                              <input type="checkbox" checked={checked} onChange={() => toggleBatch(l.id, b.batch_number, l.qty)} />
+                              <span className="font-mono">{b.batch_number}</span>
+                              {b.expiry_date && <span className="text-muted">exp {b.expiry_date}</span>}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {state.itemMasterId && (
                   <p className={`mt-1.5 text-[11px] font-semibold ${short ? "text-bad-fg" : "text-muted"}`}>
                     {state.checkingBalance
                       ? "Checking warehouse stock…"
                       : short
-                        ? `Only ${state.warehouseBalance} in warehouse stock — short by ${l.qty - (state.warehouseBalance ?? 0)}. Log a Purchase In first if needed.`
-                        : `${state.warehouseBalance} currently in warehouse stock.`}
+                        ? `Only ${availableSerials} serial(s) in warehouse stock — short by ${l.qty - availableSerials}. Log a Purchase In first if needed.`
+                        : `${availableSerials} serial(s) available in warehouse stock.`}
                   </p>
                 )}
               </div>

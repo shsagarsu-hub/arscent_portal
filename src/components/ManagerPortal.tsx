@@ -8,6 +8,7 @@ import { InventoryPanel } from "./InventoryPanel";
 import { DashboardPanel } from "./DashboardPanel";
 import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
+import { RaisePoModal } from "./RaisePoModal";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
 import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
 import { ReceivablesPanel } from "./ReceivablesPanel";
@@ -16,7 +17,7 @@ import { UndercommitmentAlerts } from "./UndercommitmentAlerts";
 import { ExpiringStockAlert } from "./ExpiringStockAlert";
 import { RevenueMarginPanel } from "./RevenueMarginPanel";
 import { monthBounds, thisMonthISO } from "@/lib/dates";
-import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
+import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { sendOrderToConsignment } from "@/app/manager/orders/actions";
 import { BoxIcon, BuildingIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TruckIcon, UploadIcon } from "./icons";
@@ -85,6 +86,8 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   const [sentLineIds, setSentLineIds] = useState<Set<string>>(new Set());
   const [sendingOrderId, setSendingOrderId] = useState<string | null>(null);
   const [fulfilling, setFulfilling] = useState<{ order: OrderRow; mode: "dc" | "invoice" } | null>(null);
+  const [raisingPoFor, setRaisingPoFor] = useState<OrderRow | null>(null);
+  const [markingTransitId, setMarkingTransitId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     // months may be a non-contiguous set (e.g. Jun + Aug, skipping Jul), so
@@ -199,6 +202,21 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       return;
     }
     if (selectedOrder?.id === o.id) setSelectedOrder(null);
+    load();
+  }
+
+  // No automated signal exists for "the courier has picked this up" -- the
+  // account manager marks it by hand once they know Zeiss has actually
+  // dispatched it, same as the real paperwork this mirrors.
+  async function markInTransit(o: OrderRow, e: React.MouseEvent) {
+    e.stopPropagation();
+    setMarkingTransitId(o.id);
+    const { error } = await supabase.from("orders").update({ status: "shipped" }).eq("id", o.id);
+    setMarkingTransitId(null);
+    if (error) {
+      alert("Couldn't update the order: " + error.message);
+      return;
+    }
     load();
   }
 
@@ -425,8 +443,10 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
                             <td>{o.order_lines.length}</td>
                             <td>{total.toLocaleString("en-IN")}</td>
                             <td>
-                              <span className={`badge ${o.status === "closed" ? "badge-good" : "badge-neutral"}`}>
-                                {o.status}
+                              <span
+                                className={`badge ${o.status === "closed" ? "badge-good" : o.status === "cancelled" ? "badge-bad" : "badge-neutral"}`}
+                              >
+                                {ORDER_STATUS_LABELS[o.status as keyof typeof ORDER_STATUS_LABELS] ?? o.status}
                               </span>
                             </td>
                             <td className="whitespace-nowrap">
@@ -434,16 +454,38 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
                                 {(o.order_type === "long_term_consignment" || o.order_type === "short_term_consignment") &&
                                   o.status !== "cancelled" &&
                                   o.status !== "closed" && (
-                                    <button
-                                      type="button"
-                                      className="btn-primary !px-2.5 !py-1 text-[11px]"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        setFulfilling({ order: o, mode: "dc" });
-                                      }}
-                                    >
-                                      Enter DC
-                                    </button>
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setRaisingPoFor(o);
+                                        }}
+                                      >
+                                        Raise PO
+                                      </button>
+                                      {o.status === "confirmed" && (
+                                        <button
+                                          type="button"
+                                          className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
+                                          disabled={markingTransitId === o.id}
+                                          onClick={(e) => void markInTransit(o, e)}
+                                        >
+                                          {markingTransitId === o.id ? "Updating…" : "Mark In Transit"}
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setFulfilling({ order: o, mode: "dc" });
+                                        }}
+                                      >
+                                        Enter DC
+                                      </button>
+                                    </>
                                   )}
                                 {o.order_type === "saleable" && o.status !== "cancelled" && o.status !== "closed" && (
                                   <button
@@ -488,6 +530,9 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
                 </div>
               )}
               {selectedOrder && <OrderDetailModal order={selectedOrder} onClose={() => setSelectedOrder(null)} />}
+              {raisingPoFor && (
+                <RaisePoModal order={raisingPoFor} onClose={() => setRaisingPoFor(null)} onDone={load} />
+              )}
               {fulfilling && (
                 <OrderFulfillmentModal
                   order={fulfilling.order}

@@ -7,7 +7,7 @@ import { HospitalOrderForm } from "./HospitalOrderForm";
 import { HospitalReportPanel } from "./HospitalReportPanel";
 import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { fmtDate, monthBounds, thisMonthISO, todayISO } from "@/lib/dates";
-import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
+import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import type { OrderType } from "@/lib/supabase/database.types";
 import { CartIcon, ClockIcon, DashboardIcon, PencilIcon, ReceiptIcon } from "./icons";
@@ -894,7 +894,9 @@ export function HospitalPortal({
                             <td>{o.order_lines.length}</td>
                             <td>{total.toLocaleString("en-IN")}</td>
                             <td>
-                              <span className="badge badge-neutral">{o.status}</span>
+                              <span className={`badge ${o.status === "closed" ? "badge-good" : o.status === "cancelled" ? "badge-bad" : "badge-neutral"}`}>
+                                {ORDER_STATUS_LABELS[o.status as keyof typeof ORDER_STATUS_LABELS] ?? o.status}
+                              </span>
                             </td>
                           </tr>
                         );

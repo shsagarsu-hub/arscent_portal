@@ -10,14 +10,14 @@ import { workOrderNo } from "@/lib/orders/workOrderNo";
 // Arscent's standing Zeiss PO contacts, editable per send -- every PO to
 // date has gone to this same distribution list (see the "Arscent PO #15 &
 // 16" email thread), so prefilling it is a real time-save, not a guess.
-const DEFAULT_TO = "sagar.manjunath.ext@zeiss.com, prashanth.pakkirappa.ext@zeiss.com, sunil.anjinappa@zeiss.com";
-const DEFAULT_CC = "keshav@arraymed.co.in, sathish.l@zeiss.com, siddharth.prakash@zeiss.com";
-const DEFAULT_REPLY_TO = "sales.arscent@gmail.com";
-const DEFAULT_NOTES = "Please find the attached PO & Kindly do the needful.";
-const DEFAULT_GST = "5";
-const DEFAULT_DELIVERY = "Immediate";
-const DEFAULT_PAYMENT = "60 Days Credit";
-const DEFAULT_WARRANTY = "NA";
+export const DEFAULT_TO = "sagar.manjunath.ext@zeiss.com, prashanth.pakkirappa.ext@zeiss.com, sunil.anjinappa@zeiss.com";
+export const DEFAULT_CC = "keshav@arraymed.co.in, sathish.l@zeiss.com, siddharth.prakash@zeiss.com";
+export const DEFAULT_REPLY_TO = "sales.arscent@gmail.com";
+export const DEFAULT_NOTES = "Please find the attached PO & Kindly do the needful.";
+export const DEFAULT_GST = "5";
+export const DEFAULT_DELIVERY = "Immediate";
+export const DEFAULT_PAYMENT = "60 Days Credit";
+export const DEFAULT_WARRANTY = "NA";
 
 interface ItemSuggestion {
   id: string;

@@ -44,6 +44,7 @@ interface StockBalanceByBatchRow extends StockBalanceRow {
  * estimate, this nets out correctly at the same per-power granularity as
  * sent/returned. */
 interface LocationStockLine {
+  itemId: string;
   itemName: string;
   sent: number;
   returned: number;
@@ -53,10 +54,25 @@ interface LocationStockLine {
 
 interface LocationGroup {
   key: string; // `${accountId}-${locationName}`
+  accountId: string;
   accountLabel: string;
+  locationId: string | null;
   locationName: string;
   lines: LocationStockLine[];
   totalBalance: number;
+}
+
+/** One serial currently on hand for one item at one location -- the same
+ * three-source split as LocationStockLine (sent/returned via the order
+ * join, consumed via a real Record'd sale_out), just narrowed to a single
+ * batch_number instead of summed across all of them. */
+interface LocationBatchRow {
+  batchNumber: string;
+  expiryDate: string | null;
+  sent: number;
+  returned: number;
+  consumed: number;
+  balance: number;
 }
 
 /** Raw shape of the query LocationGroup is built from -- every account+item
@@ -67,19 +83,34 @@ interface LocationGroup {
 interface LocationStockJoinRow {
   qty: number;
   category: MovementCategory;
+  item_id: string;
   hospital_account_id: string | null;
+  batch_number: string | null;
+  expiry_date: string | null;
   item_master: { name: string } | null;
   accounts: { label: string } | null;
-  order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
+  order_lines: { orders: { location_id: string | null; account_locations: { name: string } | null } | null } | null;
 }
 
-/** Raw shape of the usage_log query location consumption is built from. */
-interface UsageLogJoinRow {
+/** Raw shape of the query location "Consumed" is built from -- deliberately
+ * NOT usage_log. A hospital logging usage only creates a *pending*
+ * billing_requests row; real consumption isn't confirmed until a manager
+ * reviews it in Consignment's Usage Log, sets/confirms the exact batch, and
+ * clicks Record -- that's the one action that inserts an actual sale_out
+ * stock_movements row (see ConsignmentBillingPanel.recordOne). Counting
+ * straight from usage_log would show stock as consumed the moment a
+ * hospital merely logs it, before the manager has confirmed anything.
+ * These movements carry no order_line_id, so location comes via
+ * billing_requests.location_id instead of the order join used for
+ * sent/returned. */
+interface ConsumedJoinRow {
   qty: number;
-  account_id: string;
+  item_id: string;
+  hospital_account_id: string | null;
+  batch_number: string | null;
   item_master: { name: string } | null;
   accounts: { label: string } | null;
-  account_locations: { name: string } | null;
+  billing_requests: { location_id: string | null; account_locations: { name: string } | null } | null;
 }
 
 interface MovementRow {
@@ -213,6 +244,13 @@ export function InventoryPanel() {
   const [locationGroups, setLocationGroups] = useState<LocationGroup[] | null>(null);
   const [openLocationKey, setOpenLocationKey] = useState<string | null>(null);
   const [locationStockOpen, setLocationStockOpen] = useState(false);
+  // Raw rows behind locationGroups, kept around so expanding one item to its
+  // batch/serial breakdown is a client-side filter instead of a second round
+  // trip -- today's data is small enough that holding both the summary and
+  // the rows it was built from is cheap.
+  const [rawSentReturnedRows, setRawSentReturnedRows] = useState<LocationStockJoinRow[]>([]);
+  const [rawConsumedRows, setRawConsumedRows] = useState<ConsumedJoinRow[]>([]);
+  const [openItemKey, setOpenItemKey] = useState<string | null>(null);
   const [movements, setMovements] = useState<MovementRow[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -295,7 +333,7 @@ export function InventoryPanel() {
       { data: accountRows, error: accountsErr },
       { data: warehouseRows, error: warehouseErr },
       { data: locationJoinRows, error: locationErr },
-      { data: usageRows, error: usageErr },
+      { data: consumedRows, error: consumedErr },
     ] = await Promise.all([
       supabase.from("accounts").select("id, label").order("label"),
       // Only items with a non-zero total — this table can have thousands of
@@ -312,44 +350,55 @@ export function InventoryPanel() {
       supabase
         .from("stock_movements")
         .select(
-          "qty, category, hospital_account_id, item_master(name), accounts:hospital_account_id(label), order_lines(orders(account_locations(name)))"
+          "qty, category, item_id, hospital_account_id, batch_number, expiry_date, item_master(name), accounts:hospital_account_id(label), order_lines(orders(location_id, account_locations(name)))"
         )
         .in("category", ["dc_out", "dc_return_in"])
         .not("hospital_account_id", "is", null)
         .returns<LocationStockJoinRow[]>(),
-      // Consumed, from the one place it's recorded at exact item + location
-      // precision: usage_log carries both location_id and item_master_id
-      // directly (set whenever a hospital logs real usage), unlike
-      // billing_requests which only tracks the coarser SKU family.
+      // Consumed -- only real, manager-confirmed consumption: a sale_out
+      // movement created by Consignment's Record button (see ConsumedJoinRow
+      // for why this isn't usage_log). Location comes via
+      // billing_requests.location_id since these movements carry no
+      // order_line_id.
       supabase
-        .from("usage_log")
-        .select("qty, account_id, item_master(name), accounts:account_id(label), account_locations(name)")
-        .not("item_master_id", "is", null)
-        .returns<UsageLogJoinRow[]>(),
+        .from("stock_movements")
+        .select(
+          "qty, item_id, hospital_account_id, batch_number, item_master(name), accounts:hospital_account_id(label), billing_requests(location_id, account_locations(name))"
+        )
+        .eq("category", "sale_out")
+        .not("billing_request_id", "is", null)
+        .returns<ConsumedJoinRow[]>(),
     ]);
     setAccounts(accountRows ?? []);
     setWarehouse(warehouseRows ?? []);
     setBatchDetail({});
     setExpandedItemId(null);
+    setRawSentReturnedRows(locationJoinRows ?? []);
+    setRawConsumedRows(consumedRows ?? []);
 
-    const groups = new Map<string, { key: string; accountLabel: string; locationName: string; items: Map<string, LocationStockLine> }>();
-    function getLine(accountId: string, accountLabel: string, locationName: string, itemName: string) {
+    const groups = new Map<
+      string,
+      { key: string; accountId: string; accountLabel: string; locationId: string | null; locationName: string; items: Map<string, LocationStockLine> }
+    >();
+    function getLine(accountId: string, accountLabel: string, locationId: string | null, locationName: string, itemId: string, itemName: string) {
       const groupKey = `${accountId}-${locationName}`;
-      const group = groups.get(groupKey) ?? { key: groupKey, accountLabel, locationName, items: new Map<string, LocationStockLine>() };
-      const line = group.items.get(itemName) ?? { itemName, sent: 0, returned: 0, consumed: 0, balance: 0 };
+      const group = groups.get(groupKey) ?? { key: groupKey, accountId, accountLabel, locationId, locationName, items: new Map<string, LocationStockLine>() };
+      const line = group.items.get(itemName) ?? { itemId, itemName, sent: 0, returned: 0, consumed: 0, balance: 0 };
       group.items.set(itemName, line);
       groups.set(groupKey, group);
       return line;
     }
     (locationJoinRows ?? []).forEach((r) => {
       const locationName = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
-      const line = getLine(r.hospital_account_id!, r.accounts?.label ?? "—", locationName, r.item_master?.name ?? "—");
+      const locationId = r.order_lines?.orders?.location_id ?? null;
+      const line = getLine(r.hospital_account_id!, r.accounts?.label ?? "—", locationId, locationName, r.item_id, r.item_master?.name ?? "—");
       if (r.category === "dc_out") line.sent += r.qty;
       else line.returned += r.qty;
     });
-    (usageRows ?? []).forEach((r) => {
-      const locationName = r.account_locations?.name ?? "Not location-tagged";
-      const line = getLine(r.account_id, r.accounts?.label ?? "—", locationName, r.item_master?.name ?? "—");
+    (consumedRows ?? []).forEach((r) => {
+      const locationName = r.billing_requests?.account_locations?.name ?? "Not location-tagged";
+      const locationId = r.billing_requests?.location_id ?? null;
+      const line = getLine(r.hospital_account_id!, r.accounts?.label ?? "—", locationId, locationName, r.item_id, r.item_master?.name ?? "—");
       line.consumed += r.qty;
     });
     groups.forEach((g) => g.items.forEach((line) => (line.balance = line.sent - line.returned - line.consumed)));
@@ -359,13 +408,21 @@ export function InventoryPanel() {
         const lines = Array.from(g.items.values())
           .filter((l) => l.sent !== 0 || l.returned !== 0 || l.consumed !== 0)
           .sort((a, b) => a.itemName.localeCompare(b.itemName));
-        return { key: g.key, accountLabel: g.accountLabel, locationName: g.locationName, lines, totalBalance: lines.reduce((a, l) => a + l.balance, 0) };
+        return {
+          key: g.key,
+          accountId: g.accountId,
+          accountLabel: g.accountLabel,
+          locationId: g.locationId,
+          locationName: g.locationName,
+          lines,
+          totalBalance: lines.reduce((a, l) => a + l.balance, 0),
+        };
       })
       .filter((g) => g.lines.length > 0)
       .sort((a, b) => a.accountLabel.localeCompare(b.accountLabel) || a.locationName.localeCompare(b.locationName));
     setLocationGroups(builtGroups);
 
-    const firstError = accountsErr || warehouseErr || locationErr || usageErr;
+    const firstError = accountsErr || warehouseErr || locationErr || consumedErr;
     setLoadError(firstError ? firstError.message : null);
   }, [supabase]);
 
@@ -387,6 +444,40 @@ export function InventoryPanel() {
       await loadMovements();
     })();
   }, [loadMovements]);
+
+  /** Batch/serial breakdown for one item at one location, filtered
+   * client-side from the rows locationGroups was itself built from --
+   * cheap at today's volume and avoids a second round trip per click. Same
+   * three-source split as the summary line (sent/returned via the order
+   * join, consumed via a real Record'd sale_out), just keyed one level
+   * finer, by batch_number instead of summed across all of them. */
+  function getItemBatchDetail(group: LocationGroup, line: LocationStockLine): LocationBatchRow[] {
+    const byBatch = new Map<string, LocationBatchRow>();
+    function getBatch(batchNumber: string | null, expiryDate: string | null) {
+      const key = batchNumber ?? "—";
+      const row = byBatch.get(key) ?? { batchNumber: key, expiryDate, sent: 0, returned: 0, consumed: 0, balance: 0 };
+      byBatch.set(key, row);
+      return row;
+    }
+    rawSentReturnedRows.forEach((r) => {
+      if (r.hospital_account_id !== group.accountId || r.item_id !== line.itemId) return;
+      const rowLocationId = r.order_lines?.orders?.location_id ?? null;
+      if (rowLocationId !== group.locationId) return;
+      const row = getBatch(r.batch_number, r.expiry_date);
+      if (r.category === "dc_out") row.sent += r.qty;
+      else row.returned += r.qty;
+    });
+    rawConsumedRows.forEach((r) => {
+      if (r.hospital_account_id !== group.accountId || r.item_id !== line.itemId) return;
+      const rowLocationId = r.billing_requests?.location_id ?? null;
+      if (rowLocationId !== group.locationId) return;
+      getBatch(r.batch_number, null).consumed += r.qty;
+    });
+    byBatch.forEach((row) => (row.balance = row.sent - row.returned - row.consumed));
+    return Array.from(byBatch.values())
+      .filter((r) => r.sent !== 0 || r.returned !== 0 || r.consumed !== 0)
+      .sort((a, b) => a.batchNumber.localeCompare(b.batchNumber));
+  }
 
   async function toggleExpand(itemId: string) {
     if (expandedItemId === itemId) {
@@ -1171,15 +1262,63 @@ export function InventoryPanel() {
                               </tr>
                             </thead>
                             <tbody>
-                              {g.lines.map((l) => (
-                                <tr key={l.itemName}>
-                                  <td className="whitespace-nowrap">{l.itemName}</td>
-                                  <td>{l.sent}</td>
-                                  <td>{l.returned}</td>
-                                  <td>{l.consumed}</td>
-                                  <td className={`font-bold ${l.balance < 0 ? "text-bad-fg" : ""}`}>{l.balance}</td>
-                                </tr>
-                              ))}
+                              {g.lines.map((l) => {
+                                const itemKey = `${g.key}-${l.itemId}`;
+                                const isItemOpen = openItemKey === itemKey;
+                                return (
+                                  <Fragment key={itemKey}>
+                                    <tr className="cursor-pointer hover:bg-cream" onClick={() => setOpenItemKey(isItemOpen ? null : itemKey)}>
+                                      <td className="whitespace-nowrap">
+                                        <span className="mr-1.5 text-muted">{isItemOpen ? "−" : "+"}</span>
+                                        {l.itemName}
+                                      </td>
+                                      <td>{l.sent}</td>
+                                      <td>{l.returned}</td>
+                                      <td>{l.consumed}</td>
+                                      <td className={`font-bold ${l.balance < 0 ? "text-bad-fg" : ""}`}>{l.balance}</td>
+                                    </tr>
+                                    {isItemOpen && (
+                                      <tr>
+                                        <td colSpan={5} className="!p-0">
+                                          <div className="bg-[#f7f9fd] px-4 py-3">
+                                            {(() => {
+                                              const batches = getItemBatchDetail(g, l);
+                                              return batches.length === 0 ? (
+                                                <p className="text-xs text-muted">No batch-tagged movements for this item at this location.</p>
+                                              ) : (
+                                                <table className="u-table">
+                                                  <thead>
+                                                    <tr>
+                                                      <th>Batch</th>
+                                                      <th>Expiry</th>
+                                                      <th>Sent</th>
+                                                      <th>Returned</th>
+                                                      <th>Consumed</th>
+                                                      <th>On hand</th>
+                                                    </tr>
+                                                  </thead>
+                                                  <tbody>
+                                                    {batches.map((b) => (
+                                                      <tr key={b.batchNumber}>
+                                                        <td className="whitespace-nowrap font-mono text-[11.5px]">{b.batchNumber}</td>
+                                                        <td className="whitespace-nowrap">{b.expiryDate ? new Date(b.expiryDate).toLocaleDateString() : "—"}</td>
+                                                        <td>{b.sent}</td>
+                                                        <td>{b.returned}</td>
+                                                        <td>{b.consumed}</td>
+                                                        <td className={`font-bold ${b.balance < 0 ? "text-bad-fg" : ""}`}>{b.balance}</td>
+                                                      </tr>
+                                                    ))}
+                                                  </tbody>
+                                                </table>
+                                              );
+                                            })()}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </Fragment>
+                                );
+                              })}
                             </tbody>
                           </table>
                         </div>

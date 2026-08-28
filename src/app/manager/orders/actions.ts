@@ -245,7 +245,7 @@ export async function sendOrderToConsignment(orderId: string) {
 
   const { data: order, error: orderErr } = await supabase
     .from("orders")
-    .select("id, account_id, location_id, order_type, order_lines(id, sku_id, qty, net_price)")
+    .select("id, account_id, location_id, order_type, order_lines(id, sku_id, qty, net_price, source_order_line_id)")
     .eq("id", orderId)
     .single();
   if (orderErr || !order) return { success: false as const, message: orderErr?.message ?? "Order not found." };
@@ -257,18 +257,39 @@ export async function sendOrderToConsignment(orderId: string) {
   }
 
   const admin = createAdminClient();
+
+  // HospitalPortal's Log Usage already resolved the exact catalog item +
+  // batch for each of these lines (see commitUsageRows) and recorded it on
+  // usage_log -- but a PO-linked entry skips the auto-billing trigger (it's
+  // billed here instead, to avoid double-counting), so that trigger never
+  // gets a chance to copy batch_number/item_master_id across the way it does
+  // for an ad-hoc entry. Pulling it across here means the manager sees the
+  // batch already filled in on this row instead of having to look it up and
+  // retype it via Edit before Record will allow it through.
+  const sourceLineIds = order.order_lines.map((l) => l.source_order_line_id).filter((id): id is string => !!id);
+  const { data: usageRows } =
+    sourceLineIds.length > 0
+      ? await admin.from("usage_log").select("source_order_line_id, batch_number, item_master_id").in("source_order_line_id", sourceLineIds)
+      : { data: [] };
+  const usageBySourceLine = new Map((usageRows ?? []).map((u) => [u.source_order_line_id, u]));
+
   const today = new Date().toISOString().slice(0, 10);
   const { error: insertErr } = await admin.from("billing_requests").insert(
-    order.order_lines.map((l) => ({
-      order_line_id: l.id,
-      account_id: order.account_id,
-      location_id: order.location_id,
-      sku_id: l.sku_id,
-      entry_date: today,
-      qty: l.qty,
-      unit_price: l.net_price,
-      amount: l.net_price != null ? l.net_price * l.qty : null,
-    }))
+    order.order_lines.map((l) => {
+      const usage = l.source_order_line_id ? usageBySourceLine.get(l.source_order_line_id) : undefined;
+      return {
+        order_line_id: l.id,
+        account_id: order.account_id,
+        location_id: order.location_id,
+        sku_id: l.sku_id,
+        entry_date: today,
+        qty: l.qty,
+        unit_price: l.net_price,
+        amount: l.net_price != null ? l.net_price * l.qty : null,
+        batch_number: usage?.batch_number ?? null,
+        item_master_id: usage?.item_master_id ?? null,
+      };
+    })
   );
   if (insertErr) return { success: false as const, message: insertErr.message };
 

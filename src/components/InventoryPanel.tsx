@@ -35,49 +35,19 @@ interface StockBalanceByBatchRow extends StockBalanceRow {
   expiry_date: string | null;
 }
 
-interface ConsignmentBalanceRow {
-  account_id: string;
-  account_label: string;
-  item_id: string;
-  item_name: string;
-  sent: number;
-  returned: number;
-  consumed: number;
-  balance: number;
-}
-
-interface ConsignmentBalanceByBatchRow extends ConsignmentBalanceRow {
-  batch_number: string;
-}
-
-interface ConsignmentLocationRow {
-  name: string;
-  sent: number;
-  returned: number;
-}
-
-/** Raw shape of the nested stock_movements query used to derive a
- * per-location split -- consignment_balance itself has no location column
- * (stock_movements doesn't carry one), but every dc_out/dc_return_in row
- * created through a real order does carry order_line_id, and that order
- * always has a location_id, so the split is reachable by joining through it
- * instead of needing a schema change. */
-interface LocationJoinRow {
-  qty: number;
-  category: MovementCategory;
-  order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
-}
-
-/** One row per item currently on hand at one specific hospital location --
- * "on hand" here means sent minus returned; there's no per-item consumption
- * source at this granularity (billing_requests, the real record of what got
- * used, is tracked per SKU family, not per exact lens power), so this reads
- * right today (nothing has been consumed yet anywhere) but would need that
- * netted in once real usage exists against these locations. */
+/** One item currently on hand at one specific hospital location. Sent and
+ * returned come from stock_movements (dc_out/dc_return_in) joined through
+ * order_line_id -> orders -> account_locations, since stock_movements
+ * itself carries no location column. Consumed comes from a separate,
+ * exact source -- usage_log.item_master_id, set whenever a hospital logs
+ * real usage against consignment stock -- so, unlike a SKU-family-level
+ * estimate, this nets out correctly at the same per-power granularity as
+ * sent/returned. */
 interface LocationStockLine {
   itemName: string;
   sent: number;
   returned: number;
+  consumed: number;
   balance: number;
 }
 
@@ -91,10 +61,9 @@ interface LocationGroup {
 
 /** Raw shape of the query LocationGroup is built from -- every account+item
  * this session ever sent to a hospital, with the location resolved via the
- * same order_line_id -> orders -> account_locations join as the per-item
- * breakdown, falling back to the account itself (no location) for an ad-hoc
- * "Sent to Hospital" logged directly in Inventory rather than through an
- * order. */
+ * order_line_id -> orders -> account_locations join, falling back to the
+ * account itself (no location) for an ad-hoc "Sent to Hospital" logged
+ * directly in Inventory rather than through an order. */
 interface LocationStockJoinRow {
   qty: number;
   category: MovementCategory;
@@ -102,6 +71,15 @@ interface LocationStockJoinRow {
   item_master: { name: string } | null;
   accounts: { label: string } | null;
   order_lines: { orders: { account_locations: { name: string } | null } | null } | null;
+}
+
+/** Raw shape of the usage_log query location consumption is built from. */
+interface UsageLogJoinRow {
+  qty: number;
+  account_id: string;
+  item_master: { name: string } | null;
+  accounts: { label: string } | null;
+  account_locations: { name: string } | null;
 }
 
 interface MovementRow {
@@ -232,7 +210,6 @@ export function InventoryPanel() {
 
   const [accounts, setAccounts] = useState<AccountRow[] | null>(null);
   const [warehouse, setWarehouse] = useState<StockBalanceRow[] | null>(null);
-  const [consignment, setConsignment] = useState<ConsignmentBalanceRow[] | null>(null);
   const [locationGroups, setLocationGroups] = useState<LocationGroup[] | null>(null);
   const [openLocationKey, setOpenLocationKey] = useState<string | null>(null);
   const [locationStockOpen, setLocationStockOpen] = useState(false);
@@ -260,14 +237,6 @@ export function InventoryPanel() {
   const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
   const [batchDetail, setBatchDetail] = useState<Record<string, StockBalanceByBatchRow[]>>({});
   const [loadingBatchId, setLoadingBatchId] = useState<string | null>(null);
-
-  // Same expand-on-click pattern as Warehouse Stock, one level finer here:
-  // keyed by account+item since the same item can be out at multiple
-  // hospitals at once.
-  const [expandedConsignmentKey, setExpandedConsignmentKey] = useState<string | null>(null);
-  const [consignmentBatchDetail, setConsignmentBatchDetail] = useState<Record<string, ConsignmentBalanceByBatchRow[]>>({});
-  const [consignmentLocationDetail, setConsignmentLocationDetail] = useState<Record<string, ConsignmentLocationRow[]>>({});
-  const [loadingConsignmentKey, setLoadingConsignmentKey] = useState<string | null>(null);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editCategory, setEditCategory] = useState<MovementCategory>("purchase_in");
@@ -325,8 +294,8 @@ export function InventoryPanel() {
     const [
       { data: accountRows, error: accountsErr },
       { data: warehouseRows, error: warehouseErr },
-      { data: consignmentRows, error: consignmentErr },
       { data: locationJoinRows, error: locationErr },
+      { data: usageRows, error: usageErr },
     ] = await Promise.all([
       supabase.from("accounts").select("id, label").order("label"),
       // Only items with a non-zero total — this table can have thousands of
@@ -336,11 +305,10 @@ export function InventoryPanel() {
       // "sold more than we've recorded receiving" signal worth seeing, not
       // hiding.
       supabase.from("stock_balance").select("*").neq("balance", 0).order("name"),
-      supabase.from("consignment_balance").select("*").order("account_label"),
-      // Same location join as the per-item "By location" breakdown, but
-      // fetched once up front and regrouped location-first -- "what's on
-      // the shelf at this specific branch" rather than "which branches have
-      // this item".
+      // Sent/returned, location-first -- "what's on the shelf at this
+      // specific branch." stock_movements carries no location column, so
+      // the split is reached by joining through order_line_id -> orders ->
+      // account_locations, the same as before.
       supabase
         .from("stock_movements")
         .select(
@@ -349,42 +317,55 @@ export function InventoryPanel() {
         .in("category", ["dc_out", "dc_return_in"])
         .not("hospital_account_id", "is", null)
         .returns<LocationStockJoinRow[]>(),
+      // Consumed, from the one place it's recorded at exact item + location
+      // precision: usage_log carries both location_id and item_master_id
+      // directly (set whenever a hospital logs real usage), unlike
+      // billing_requests which only tracks the coarser SKU family.
+      supabase
+        .from("usage_log")
+        .select("qty, account_id, item_master(name), accounts:account_id(label), account_locations(name)")
+        .not("item_master_id", "is", null)
+        .returns<UsageLogJoinRow[]>(),
     ]);
     setAccounts(accountRows ?? []);
     setWarehouse(warehouseRows ?? []);
-    setConsignment(consignmentRows ?? []);
     setBatchDetail({});
     setExpandedItemId(null);
-    setConsignmentBatchDetail({});
-    setConsignmentLocationDetail({});
-    setExpandedConsignmentKey(null);
 
-    const groups = new Map<string, { accountLabel: string; locationName: string; items: Map<string, LocationStockLine> }>();
-    (locationJoinRows ?? []).forEach((r) => {
-      const accountLabel = r.accounts?.label ?? "—";
-      const locationName = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
-      const groupKey = `${r.hospital_account_id}-${locationName}`;
-      const group = groups.get(groupKey) ?? { accountLabel, locationName, items: new Map<string, LocationStockLine>() };
-      const itemName = r.item_master?.name ?? "—";
-      const line = group.items.get(itemName) ?? { itemName, sent: 0, returned: 0, balance: 0 };
-      if (r.category === "dc_out") line.sent += r.qty;
-      else line.returned += r.qty;
-      line.balance = line.sent - line.returned;
+    const groups = new Map<string, { key: string; accountLabel: string; locationName: string; items: Map<string, LocationStockLine> }>();
+    function getLine(accountId: string, accountLabel: string, locationName: string, itemName: string) {
+      const groupKey = `${accountId}-${locationName}`;
+      const group = groups.get(groupKey) ?? { key: groupKey, accountLabel, locationName, items: new Map<string, LocationStockLine>() };
+      const line = group.items.get(itemName) ?? { itemName, sent: 0, returned: 0, consumed: 0, balance: 0 };
       group.items.set(itemName, line);
       groups.set(groupKey, group);
+      return line;
+    }
+    (locationJoinRows ?? []).forEach((r) => {
+      const locationName = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
+      const line = getLine(r.hospital_account_id!, r.accounts?.label ?? "—", locationName, r.item_master?.name ?? "—");
+      if (r.category === "dc_out") line.sent += r.qty;
+      else line.returned += r.qty;
     });
-    const builtGroups: LocationGroup[] = Array.from(groups.entries())
-      .map(([key, g]) => {
+    (usageRows ?? []).forEach((r) => {
+      const locationName = r.account_locations?.name ?? "Not location-tagged";
+      const line = getLine(r.account_id, r.accounts?.label ?? "—", locationName, r.item_master?.name ?? "—");
+      line.consumed += r.qty;
+    });
+    groups.forEach((g) => g.items.forEach((line) => (line.balance = line.sent - line.returned - line.consumed)));
+
+    const builtGroups: LocationGroup[] = Array.from(groups.values())
+      .map((g) => {
         const lines = Array.from(g.items.values())
-          .filter((l) => l.balance !== 0)
+          .filter((l) => l.sent !== 0 || l.returned !== 0 || l.consumed !== 0)
           .sort((a, b) => a.itemName.localeCompare(b.itemName));
-        return { key, accountLabel: g.accountLabel, locationName: g.locationName, lines, totalBalance: lines.reduce((a, l) => a + l.balance, 0) };
+        return { key: g.key, accountLabel: g.accountLabel, locationName: g.locationName, lines, totalBalance: lines.reduce((a, l) => a + l.balance, 0) };
       })
       .filter((g) => g.lines.length > 0)
       .sort((a, b) => a.accountLabel.localeCompare(b.accountLabel) || a.locationName.localeCompare(b.locationName));
     setLocationGroups(builtGroups);
 
-    const firstError = accountsErr || warehouseErr || consignmentErr || locationErr;
+    const firstError = accountsErr || warehouseErr || locationErr || usageErr;
     setLoadError(firstError ? firstError.message : null);
   }, [supabase]);
 
@@ -423,53 +404,6 @@ export function InventoryPanel() {
       .returns<StockBalanceByBatchRow[]>();
     setBatchDetail((prev) => ({ ...prev, [itemId]: data ?? [] }));
     setLoadingBatchId(null);
-  }
-
-  async function toggleConsignmentExpand(accountId: string, itemId: string) {
-    const key = `${accountId}-${itemId}`;
-    if (expandedConsignmentKey === key) {
-      setExpandedConsignmentKey(null);
-      return;
-    }
-    setExpandedConsignmentKey(key);
-    if (consignmentBatchDetail[key]) return;
-    setLoadingConsignmentKey(key);
-    const [{ data }, { data: locationRows }] = await Promise.all([
-      supabase
-        .from("consignment_balance_by_batch")
-        .select("*")
-        .eq("account_id", accountId)
-        .eq("item_id", itemId)
-        .order("batch_number")
-        .returns<ConsignmentBalanceByBatchRow[]>(),
-      // stock_movements has no location column, so the split is reached by
-      // joining through order_line_id -> orders.location_id instead (every
-      // dc_out/dc_return_in row created via a real order carries it). Rows
-      // with no order_line_id (an ad-hoc "Sent to Hospital" logged directly
-      // in Inventory, not through an order) fall into "Not location-tagged".
-      supabase
-        .from("stock_movements")
-        .select("qty, category, order_lines(orders(account_locations(name)))")
-        .eq("hospital_account_id", accountId)
-        .eq("item_id", itemId)
-        .in("category", ["dc_out", "dc_return_in"])
-        .returns<LocationJoinRow[]>(),
-    ]);
-    setConsignmentBatchDetail((prev) => ({ ...prev, [key]: data ?? [] }));
-
-    const byLocation = new Map<string, ConsignmentLocationRow>();
-    (locationRows ?? []).forEach((r) => {
-      const name = r.order_lines?.orders?.account_locations?.name ?? "Not location-tagged";
-      const row = byLocation.get(name) ?? { name, sent: 0, returned: 0 };
-      if (r.category === "dc_out") row.sent += r.qty;
-      else row.returned += r.qty;
-      byLocation.set(name, row);
-    });
-    setConsignmentLocationDetail((prev) => ({
-      ...prev,
-      [key]: Array.from(byLocation.values()).sort((a, b) => a.name.localeCompare(b.name)),
-    }));
-    setLoadingConsignmentKey(null);
   }
 
   async function createItem(name: string) {
@@ -687,7 +621,7 @@ export function InventoryPanel() {
     await refreshAll();
   }
 
-  if (accounts === null || warehouse === null || consignment === null || movements === null) {
+  if (accounts === null || warehouse === null || locationGroups === null || movements === null) {
     return <Loading />;
   }
 
@@ -1171,16 +1105,31 @@ export function InventoryPanel() {
       </div>
 
       <div className="card">
-        <button
-          type="button"
-          className="flex w-full items-center justify-between text-left"
-          onClick={() => setLocationStockOpen((o) => !o)}
-        >
-          <div>
-            <h3 className="text-[14.5px] font-extrabold text-ink">Consignment stock by location</h3>
-          </div>
-          <span className="ml-3 shrink-0 text-lg text-muted">{locationStockOpen ? "−" : "+"}</span>
-        </button>
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            className="flex flex-1 items-center justify-between text-left"
+            onClick={() => setLocationStockOpen((o) => !o)}
+          >
+            <div>
+              <h3 className="text-[14.5px] font-extrabold text-ink">Consignment stock by location</h3>
+            </div>
+            <span className="ml-3 shrink-0 text-lg text-muted">{locationStockOpen ? "−" : "+"}</span>
+          </button>
+          <ExportButton
+            filename="consignment-stock-by-location"
+            columns={[
+              { key: "accountLabel", label: "Hospital" },
+              { key: "locationName", label: "Location" },
+              { key: "itemName", label: "Item" },
+              { key: "sent", label: "Sent" },
+              { key: "returned", label: "Returned" },
+              { key: "consumed", label: "Consumed" },
+              { key: "balance", label: "On hand" },
+            ]}
+            rows={locationGroups?.flatMap((g) => g.lines.map((l) => ({ accountLabel: g.accountLabel, locationName: g.locationName, ...l }))) ?? []}
+          />
+        </div>
         {locationStockOpen && (
           <div className="mt-3.5">
             {locationGroups === null ? (
@@ -1217,6 +1166,7 @@ export function InventoryPanel() {
                                 <th>Item</th>
                                 <th>Sent</th>
                                 <th>Returned</th>
+                                <th>Consumed</th>
                                 <th>On hand</th>
                               </tr>
                             </thead>
@@ -1226,6 +1176,7 @@ export function InventoryPanel() {
                                   <td className="whitespace-nowrap">{l.itemName}</td>
                                   <td>{l.sent}</td>
                                   <td>{l.returned}</td>
+                                  <td>{l.consumed}</td>
                                   <td className={`font-bold ${l.balance < 0 ? "text-bad-fg" : ""}`}>{l.balance}</td>
                                 </tr>
                               ))}
@@ -1242,125 +1193,6 @@ export function InventoryPanel() {
         )}
       </div>
 
-      <div className="card">
-        <div className="mb-3.5 flex items-center justify-between gap-2">
-          <h3 className="text-[14.5px] font-extrabold text-ink">Consignment by hospital</h3>
-          <ExportButton
-            filename="consignment-by-hospital"
-            columns={[
-              { key: "account_label", label: "Hospital" },
-              { key: "item_name", label: "Item" },
-              { key: "sent", label: "Sent" },
-              { key: "returned", label: "Returned" },
-              { key: "consumed", label: "Consumed" },
-              { key: "balance", label: "Balance" },
-            ]}
-            rows={consignment}
-          />
-        </div>
-        {consignment.length === 0 ? (
-          <Empty title="Nothing out on consignment" body="Log a 'Sent to Hospital' movement to start tracking it." />
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="u-table">
-              <thead>
-                <tr>
-                  <th>Hospital</th>
-                  <th>Item</th>
-                  <th>Sent</th>
-                  <th>Returned</th>
-                  <th>Consumed</th>
-                  <th>Balance</th>
-                </tr>
-              </thead>
-              <tbody>
-                {consignment.map((c) => {
-                  const key = `${c.account_id}-${c.item_id}`;
-                  const isOpen = expandedConsignmentKey === key;
-                  return (
-                    <Fragment key={key}>
-                      <tr className="cursor-pointer hover:bg-cream" onClick={() => toggleConsignmentExpand(c.account_id, c.item_id)}>
-                        <td className="whitespace-nowrap">{c.account_label}</td>
-                        <td className="whitespace-nowrap">
-                          <span className="mr-1.5 text-muted">{isOpen ? "−" : "+"}</span>
-                          {c.item_name}
-                        </td>
-                        <td>{c.sent}</td>
-                        <td>{c.returned}</td>
-                        <td>{c.consumed}</td>
-                        <td className="font-bold">{c.balance}</td>
-                      </tr>
-                      {isOpen && (
-                        <tr>
-                          <td colSpan={6} className="!p-0">
-                            <div className="bg-[#f7f9fd] px-4 py-3">
-                              {loadingConsignmentKey === key ? (
-                                <Loading />
-                              ) : (
-                                <>
-                                  {(consignmentLocationDetail[key]?.length ?? 0) > 1 && (
-                                    <div className="mb-3">
-                                      <p className="mb-1.5 text-[11px] font-bold uppercase tracking-wide text-muted">By location</p>
-                                      <table className="u-table">
-                                        <thead>
-                                          <tr>
-                                            <th>Location</th>
-                                            <th>Sent</th>
-                                            <th>Returned</th>
-                                          </tr>
-                                        </thead>
-                                        <tbody>
-                                          {consignmentLocationDetail[key]!.map((l) => (
-                                            <tr key={l.name}>
-                                              <td className="whitespace-nowrap">{l.name}</td>
-                                              <td>{l.sent}</td>
-                                              <td>{l.returned}</td>
-                                            </tr>
-                                          ))}
-                                        </tbody>
-                                      </table>
-                                    </div>
-                                  )}
-                                  {(consignmentBatchDetail[key]?.length ?? 0) === 0 ? (
-                                    <p className="text-xs text-muted">No batch-tagged movements for this item at this hospital.</p>
-                                  ) : (
-                                    <table className="u-table">
-                                      <thead>
-                                        <tr>
-                                          <th>Batch</th>
-                                          <th>Sent</th>
-                                          <th>Returned</th>
-                                          <th>Consumed</th>
-                                          <th>Balance</th>
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {consignmentBatchDetail[key]!.map((b) => (
-                                          <tr key={b.batch_number}>
-                                            <td className="whitespace-nowrap">{b.batch_number}</td>
-                                            <td>{b.sent}</td>
-                                            <td>{b.returned}</td>
-                                            <td>{b.consumed}</td>
-                                            <td className={`font-bold ${b.balance < 0 ? "text-bad-fg" : ""}`}>{b.balance}</td>
-                                          </tr>
-                                        ))}
-                                      </tbody>
-                                    </table>
-                                  )}
-                                </>
-                              )}
-                            </div>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
     </div>
   );
 }

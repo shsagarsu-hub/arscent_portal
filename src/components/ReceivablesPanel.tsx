@@ -3,7 +3,7 @@
 import { Fragment, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
-import { closeReceivable, reopenReceivable } from "@/app/manager/receivables/actions";
+import { closeReceivable, reopenReceivable, allocatePaymentFifo, type FifoAllocationResult } from "@/app/manager/receivables/actions";
 import { ExportButton } from "./ExportButton";
 
 interface InvoiceLineRow {
@@ -37,7 +37,9 @@ interface Receivable {
   total: number;
   dueDate: string | null;
   daysDue: number;
-  payment: PaymentRow | null;
+  payments: PaymentRow[];
+  totalReceived: number;
+  remainingDue: number;
 }
 
 function inr(n: number) {
@@ -73,8 +75,16 @@ function todayIso() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
 
-function CloseReceivableForm({ invoiceNo, onDone }: { invoiceNo: string; onDone: () => void }) {
-  const [amount, setAmount] = useState("");
+function CloseReceivableForm({
+  invoiceNo,
+  defaultAmount,
+  onDone,
+}: {
+  invoiceNo: string;
+  defaultAmount: number;
+  onDone: () => void;
+}) {
+  const [amount, setAmount] = useState(String(defaultAmount));
   const [utr, setUtr] = useState("");
   const [date, setDate] = useState(todayIso());
   const [saving, setSaving] = useState(false);
@@ -127,6 +137,152 @@ function CloseReceivableForm({ invoiceNo, onDone }: { invoiceNo: string; onDone:
 }
 
 /**
+ * One lump-sum receipt, applied server-side (allocatePaymentFifo) against
+ * an account's open invoices oldest-first -- the common real case where a
+ * client pays a round number that doesn't line up with any single invoice.
+ * Shown collapsed by default since most days nobody needs it; the per-
+ * invoice "Mark received" flow above stays the default path.
+ */
+function FifoPaymentForm({
+  accounts,
+  defaultAccountId,
+  onDone,
+}: {
+  accounts: [string, string][];
+  defaultAccountId: string;
+  onDone: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [accountId, setAccountId] = useState(defaultAccountId);
+  const [amount, setAmount] = useState("");
+  const [utr, setUtr] = useState("");
+  const [date, setDate] = useState(todayIso());
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<FifoAllocationResult | null>(null);
+
+  async function submit() {
+    if (!accountId) {
+      setError("Pick which account this payment is from.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setResult(null);
+    try {
+      const res = await allocatePaymentFifo(accountId, { totalAmount: amount, utr, paymentDate: date });
+      setResult(res);
+      setAmount("");
+      setUtr("");
+      onDone();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to record payment.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mb-4 rounded-[6px] border border-border">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between px-3 py-2.5 text-left"
+        onClick={() => setOpen((v) => !v)}
+      >
+        <span className="text-[12.5px] font-bold text-ink-soft">Record a lump-sum payment (auto-allocate FIFO)</span>
+        <span className="text-muted">{open ? "−" : "+"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-border p-3">
+          <p className="mb-2.5 text-[11px] text-muted">
+            Applies the amount against this account&apos;s open invoices, oldest first, closing what it fully covers and
+            leaving a partial balance on whichever invoice it runs out on.
+          </p>
+          <div className="flex flex-wrap items-end gap-2">
+            <div>
+              <label className="field-label">Account</label>
+              <select
+                className="field-input !py-1 w-[220px] text-[12.5px]"
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+              >
+                <option value="">Select…</option>
+                {accounts.map(([id, label]) => (
+                  <option key={id} value={id}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="field-label">Amount received</label>
+              <input
+                type="number"
+                step="0.01"
+                className="field-input !py-1 w-[130px] text-[12.5px]"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="field-label">UTR</label>
+              <input className="field-input !py-1 w-[150px] text-[12.5px]" value={utr} onChange={(e) => setUtr(e.target.value)} />
+            </div>
+            <div>
+              <label className="field-label">Date received</label>
+              <input
+                type="date"
+                className="field-input !py-1 text-[12.5px]"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+            </div>
+            <button type="button" className="btn-primary !px-3 !py-1.5 text-xs" disabled={saving} onClick={submit}>
+              {saving ? "Allocating…" : "Allocate"}
+            </button>
+          </div>
+          {error && <div className="mt-2 text-[11px] font-semibold text-bad-fg">{error}</div>}
+          {result && (
+            <div className="mt-3 rounded-[6px] border border-border bg-app/60 p-2.5">
+              {result.allocations.length === 0 ? (
+                <p className="text-[11.5px] text-muted">No open invoices to apply this against.</p>
+              ) : (
+                <table className="u-table">
+                  <thead>
+                    <tr>
+                      <th>Invoice</th>
+                      <th>Invoice date</th>
+                      <th className="text-right">Allocated</th>
+                      <th className="text-right">Remaining after</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.allocations.map((a) => (
+                      <tr key={a.invoiceNo}>
+                        <td className="whitespace-nowrap font-semibold text-ink">{a.invoiceNo}</td>
+                        <td className="text-muted">{a.invoiceDate}</td>
+                        <td className="text-right text-good-fg">{inr(a.allocated)}</td>
+                        <td className="text-right text-muted">{a.remainingDueAfter > 0 ? inr(a.remainingDueAfter) : "closed"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {result.leftover > 0.01 && (
+                <p className="mt-2 text-[11.5px] font-semibold text-watch-fg">
+                  {inr(result.leftover)} left over — no more open invoices to apply it against. Hold it for the next
+                  invoice, or double-check the amount.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
  * "Due" comes from confirmed Tally invoices, not usage or committed
  * targets -- this is real accounts-receivable tracking, one line per real
  * invoice_no. Credit/debit notes fold into the invoice they adjust
@@ -156,7 +312,12 @@ export function ReceivablesPanel() {
     ]);
 
     const accountMap = new Map((accountRows ?? []).map((a) => [a.id, a]));
-    const paymentMap = new Map((payments ?? []).map((p) => [p.invoice_no, p]));
+    const paymentsByInvoice = new Map<string, PaymentRow[]>();
+    (payments ?? []).forEach((p) => {
+      const arr = paymentsByInvoice.get(p.invoice_no) ?? [];
+      arr.push(p);
+      paymentsByInvoice.set(p.invoice_no, arr);
+    });
     const today = todayIso();
 
     const byInvoice = new Map<string, { accountId: string; invoiceDate: string; total: number }>();
@@ -175,6 +336,8 @@ export function ReceivablesPanel() {
     const result: Receivable[] = Array.from(byInvoice.entries()).map(([invoiceNo, v]) => {
       const account = accountMap.get(v.accountId);
       const dueDate = account?.iol_payment_days != null ? addDays(v.invoiceDate, account.iol_payment_days) : null;
+      const invoicePayments = paymentsByInvoice.get(invoiceNo) ?? [];
+      const totalReceived = invoicePayments.reduce((a, p) => a + p.amount_received, 0);
       return {
         invoiceNo,
         accountId: v.accountId,
@@ -183,7 +346,12 @@ export function ReceivablesPanel() {
         total: v.total,
         dueDate,
         daysDue: daysBetween(v.invoiceDate, today),
-        payment: paymentMap.get(invoiceNo) ?? null,
+        payments: invoicePayments,
+        totalReceived,
+        // Floating-point sums can land a hair off zero (e.g. 0.0000000002)
+        // -- clamped so a fully-paid invoice doesn't linger in "due" for a
+        // fraction of a rupee.
+        remainingDue: Math.max(0, Math.round((v.total - totalReceived) * 100) / 100),
       };
     });
     result.sort((a, b) => b.daysDue - a.daysDue);
@@ -202,12 +370,14 @@ export function ReceivablesPanel() {
   );
 
   const filtered = receivables.filter((r) => !accountFilter || r.accountId === accountFilter);
-  const due = filtered.filter((r) => !r.payment);
-  const received = filtered.filter((r) => r.payment);
+  // A partially-paid invoice belongs in both: it still owes a remaining
+  // balance (due) and it has real payment rows to show (received).
+  const due = filtered.filter((r) => r.remainingDue > 0.01);
+  const received = filtered.filter((r) => r.payments.length > 0);
 
-  const totalDue = due.reduce((a, r) => a + r.total, 0);
+  const totalDue = due.reduce((a, r) => a + r.remainingDue, 0);
   const overdue = due.filter((r) => r.dueDate && r.dueDate < todayIso());
-  const totalOverdue = overdue.reduce((a, r) => a + r.total, 0);
+  const totalOverdue = overdue.reduce((a, r) => a + r.remainingDue, 0);
 
   return (
     <div className="card">
@@ -221,14 +391,16 @@ export function ReceivablesPanel() {
             { key: "invoiceDate", label: "Invoice date" },
             { key: "dueDate", label: "Due date" },
             { key: "daysDue", label: "Days due" },
-            { key: "total", label: "Amount" },
+            { key: "total", label: "Invoice total" },
+            { key: "totalReceived", label: "Received so far" },
+            { key: "remainingDue", label: "Remaining due" },
           ]}
           rows={due}
         />
       </div>
       <p className="mb-3.5 text-xs text-muted">
-        Every confirmed Tally invoice, due as per each account&apos;s payment term (set in Accounts). A due line closes only
-        by recording the amount received, UTR, and payment date.
+        Every confirmed Tally invoice, due as per each account&apos;s payment term (set in Accounts). Close one invoice at a
+        time below, or record a lump-sum receipt and let it apply itself across the oldest open invoices first.
       </p>
 
       <div className="mb-3.5 flex flex-wrap items-end gap-3">
@@ -244,6 +416,8 @@ export function ReceivablesPanel() {
           </select>
         </div>
       </div>
+
+      <FifoPaymentForm accounts={accounts} defaultAccountId={accountFilter} onDone={() => void load()} />
 
       <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
         <div className="rounded-[6px] border border-border bg-card p-3">
@@ -287,7 +461,12 @@ export function ReceivablesPanel() {
                       <td className="text-muted">{r.invoiceDate}</td>
                       <td className={isOverdue ? "font-bold text-bad-fg" : "text-muted"}>{r.dueDate ?? "—"}</td>
                       <td className={`text-right ${isOverdue ? "font-bold text-bad-fg" : ""}`}>{r.daysDue}d</td>
-                      <td className="text-right font-semibold text-ink">{inr(r.total)}</td>
+                      <td className="text-right font-semibold text-ink">
+                        {inr(r.remainingDue)}
+                        {r.totalReceived > 0 && (
+                          <div className="text-[10px] font-normal text-muted">of {inr(r.total)} — partially paid</div>
+                        )}
+                      </td>
                       <td>
                         <button
                           type="button"
@@ -303,6 +482,7 @@ export function ReceivablesPanel() {
                         <td colSpan={7}>
                           <CloseReceivableForm
                             invoiceNo={r.invoiceNo}
+                            defaultAmount={r.remainingDue}
                             onDone={() => {
                               setClosingInvoice(null);
                               void load();
@@ -337,20 +517,25 @@ export function ReceivablesPanel() {
               </tr>
             </thead>
             <tbody>
-              {received.map((r) => (
-                <tr key={r.invoiceNo}>
+              {/* One row per payment, not per invoice -- a partially-paid
+                  invoice (see allocatePaymentFifo) can carry more than one. */}
+              {received
+                .flatMap((r) => r.payments.map((p) => ({ r, p })))
+                .sort((a, b) => a.r.invoiceNo.localeCompare(b.r.invoiceNo) || a.p.payment_date.localeCompare(b.p.payment_date))
+                .map(({ r, p }, i) => (
+                <tr key={`${r.invoiceNo}-${i}`}>
                   <td className="whitespace-nowrap font-semibold text-ink">{r.invoiceNo}</td>
                   <td className="text-muted">{r.accountLabel}</td>
-                  <td className="text-right text-good-fg">{inr(r.payment!.amount_received)}</td>
-                  <td className="font-mono text-[11.5px] text-muted">{r.payment!.utr}</td>
-                  <td className="text-muted">{r.payment!.payment_date}</td>
+                  <td className="text-right text-good-fg">{inr(p.amount_received)}</td>
+                  <td className="font-mono text-[11.5px] text-muted">{p.utr}</td>
+                  <td className="text-muted">{p.payment_date}</td>
                   <td>
                     <button
                       type="button"
                       className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
                       disabled={reopeningInvoice === r.invoiceNo}
                       onClick={async () => {
-                        if (!confirm(`Reopen ${r.invoiceNo}? This removes the recorded payment.`)) return;
+                        if (!confirm(`Reopen ${r.invoiceNo}? This removes all recorded payments for this invoice.`)) return;
                         setReopeningInvoice(r.invoiceNo);
                         await reopenReceivable(r.invoiceNo);
                         setReopeningInvoice(null);

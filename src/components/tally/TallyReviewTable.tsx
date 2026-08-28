@@ -7,6 +7,7 @@ import { AppShell, Empty } from "@/components/AppShell";
 import { BuildingIcon, DashboardIcon, UploadIcon } from "@/components/icons";
 import { matchAccount, matchCatalogItem, matchSku, stripPowerSpecs } from "@/lib/tally/matching";
 import { PurchaseInvoiceImportPanel } from "./PurchaseInvoiceImportPanel";
+import { ImportedPurchaseInvoicesList } from "./ImportedPurchaseInvoicesList";
 import { ImportedInvoicesList } from "./ImportedInvoicesList";
 
 interface AccountRow {
@@ -256,6 +257,10 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
   // remounts and re-fetches, instead of the just-confirmed invoice not
   // showing up in the "already imported" list until the page is reloaded.
   const [importedRefreshKey, setImportedRefreshKey] = useState(0);
+  // Same remount-on-import trick, for the separate Zeiss purchase invoice
+  // history below -- it has nothing to do with Tally sales invoices, so it
+  // gets its own key rather than sharing importedRefreshKey.
+  const [purchaseImportedRefreshKey, setPurchaseImportedRefreshKey] = useState(0);
 
   function updateLine(key: string, patch: Partial<ReviewLine>) {
     setLines((prev) => prev.map((l) => (l.key === key ? { ...l, ...patch } : l)));
@@ -741,7 +746,8 @@ export function TallyReviewTable({ accounts, skus }: { accounts: AccountRow[]; s
       </div>
 
       <div className="mt-8">
-        <PurchaseInvoiceImportPanel />
+        <ImportedPurchaseInvoicesList key={purchaseImportedRefreshKey} />
+        <PurchaseInvoiceImportPanel onImported={() => setPurchaseImportedRefreshKey((k) => k + 1)} />
       </div>
             </>
           ),

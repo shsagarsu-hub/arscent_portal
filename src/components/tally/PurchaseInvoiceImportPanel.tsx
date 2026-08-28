@@ -21,7 +21,7 @@ interface ReviewLine extends ParsedLine {
   itemId: string | null;
 }
 
-export function PurchaseInvoiceImportPanel() {
+export function PurchaseInvoiceImportPanel({ onImported }: { onImported?: () => void } = {}) {
   const supabase = createClient();
   const [invoiceNo, setInvoiceNo] = useState<string | null>(null);
   const [lines, setLines] = useState<ReviewLine[]>([]);
@@ -32,6 +32,7 @@ export function PurchaseInvoiceImportPanel() {
   const [importing, setImporting] = useState(false);
   const [confirmed, setConfirmed] = useState<{ movements: number; total: number } | null>(null);
   const [importError, setImportError] = useState<string | null>(null);
+  const [duplicateOf, setDuplicateOf] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   async function handleParse() {
@@ -41,6 +42,7 @@ export function PurchaseInvoiceImportPanel() {
     setParseWarnings([]);
     setConfirmed(null);
     setImportError(null);
+    setDuplicateOf(null);
     try {
       const formData = new FormData();
       formData.append("file", file);
@@ -53,6 +55,25 @@ export function PurchaseInvoiceImportPanel() {
       setParseWarnings(body.warnings ?? []);
       setInvoiceNo(body.invoiceNo ?? null);
       const parsedLines: ParsedLine[] = body.lines;
+
+      // This exact invoice may already have been imported (a re-upload, two
+      // tabs open, etc.) -- checked before anything else so the review table
+      // never even renders for a duplicate. Same notes-prefix convention
+      // ImportedPurchaseInvoicesList groups by.
+      if (body.invoiceNo) {
+        const { data: existing } = await supabase
+          .from("stock_movements")
+          .select("id")
+          .eq("category", "purchase_in")
+          .ilike("notes", `Zeiss Invoice ${body.invoiceNo}%`)
+          .limit(1);
+        if (existing && existing.length > 0) {
+          setDuplicateOf(body.invoiceNo);
+          setFile(null);
+          if (fileInputRef.current) fileInputRef.current.value = "";
+          return;
+        }
+      }
 
       // Every real item_master row for these products is named "ZEISS " +
       // the invoice's own product description ("CT LUCIA 621P TIP2.2 DPT
@@ -83,6 +104,22 @@ export function PurchaseInvoiceImportPanel() {
     setImporting(true);
     setImportError(null);
     setConfirmed(null);
+
+    if (invoiceNo) {
+      const { data: existing } = await supabase
+        .from("stock_movements")
+        .select("id")
+        .eq("category", "purchase_in")
+        .ilike("notes", `Zeiss Invoice ${invoiceNo}%`)
+        .limit(1);
+      if (existing && existing.length > 0) {
+        setImporting(false);
+        setDuplicateOf(invoiceNo);
+        setLines([]);
+        setInvoiceNo(null);
+        return;
+      }
+    }
 
     const {
       data: { user },
@@ -154,6 +191,7 @@ export function PurchaseInvoiceImportPanel() {
     setConfirmed({ movements: movementRows.length, total: lines.length });
     setLines([]);
     setInvoiceNo(null);
+    onImported?.();
   }
 
   const stats = {
@@ -185,6 +223,12 @@ export function PurchaseInvoiceImportPanel() {
         </button>
       </div>
       {parseError && <p className="mb-3 text-xs font-semibold text-bad-fg">{parseError}</p>}
+      {duplicateOf && (
+        <p className="mb-3 text-xs font-semibold text-bad-fg">
+          Invoice <span className="font-mono">{duplicateOf}</span> has already been imported — check "Purchase invoices
+          imported to date" above. Cancel it there first if you need to re-import.
+        </p>
+      )}
       {parseWarnings.length > 0 && (
         <ul className="mb-3 list-disc space-y-0.5 pl-4 text-xs font-semibold text-watch-fg">
           {parseWarnings.map((w, i) => (

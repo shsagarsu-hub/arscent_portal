@@ -130,6 +130,9 @@ export function OrderFulfillmentModal({
   const supabase = createClient();
   const [refNumber, setRefNumber] = useState("");
   const [refDate, setRefDate] = useState(todayISO());
+  const [trackingInfo, setTrackingInfo] = useState("");
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
   const [lines, setLines] = useState<Record<string, LineState>>(
     Object.fromEntries(
       order.order_lines.map((l) => [
@@ -192,9 +195,20 @@ export function OrderFulfillmentModal({
   }
 
   async function submit() {
-    if (!refNumber.trim() || !refDate) {
-      setError(`Enter both a ${mode === "dc" ? "DC" : "Invoice"} number and date.`);
-      return;
+    if (mode === "dc") {
+      if (!refNumber.trim() || !refDate) {
+        setError("Enter both a DC number and date.");
+        return;
+      }
+    } else {
+      if (!invoiceFile) {
+        setError("Upload the sales invoice.");
+        return;
+      }
+      if (!refDate) {
+        setError("Enter the invoice date.");
+        return;
+      }
     }
     if (!allReady) {
       setError("Confirm the exact catalog item and batch for every line first.");
@@ -203,24 +217,44 @@ export function OrderFulfillmentModal({
     setSaving(true);
     setError(null);
 
+    let salesInvoiceUrl: string | null = null;
+    if (mode === "invoice") {
+      setUploading(true);
+      const formData = new FormData();
+      formData.append("file", invoiceFile!);
+      formData.append("kind", "sales");
+      const res = await fetch("/api/manager/invoice-upload", { method: "POST", body: formData });
+      const body = await res.json();
+      setUploading(false);
+      if (!res.ok) {
+        setSaving(false);
+        setError(`Couldn't upload the invoice: ${body.error ?? "unknown error"}`);
+        return;
+      }
+      salesInvoiceUrl = body.url;
+    }
+
     const category: MovementCategory = mode === "dc" ? "dc_out" : "sale_out";
     const noteLabel = mode === "dc" ? "DC" : "Invoice";
+    const noteRef = mode === "dc" ? refNumber.trim() : (invoiceFile?.name ?? "");
     // One stock_movements row per selected serial (qty always 1) rather than
     // one row carrying the line's whole qty against a single batch_number --
     // each batch here IS one physical unit, so lumping qty onto one serial
     // would falsely zero out that one serial while leaving the other real
     // units still marked as sitting in the warehouse.
-    const movements = order.order_lines.flatMap((l) =>
-      lines[l.id].selectedBatches.map((batch) => ({
+    const movements = order.order_lines.flatMap((l) => {
+      const expiryByBatch = new Map((lines[l.id].batchOptions ?? []).map((b) => [b.batch_number, b.expiry_date]));
+      return lines[l.id].selectedBatches.map((batch) => ({
         item_id: lines[l.id].itemMasterId,
         category,
         qty: 1,
         hospital_account_id: mode === "dc" ? order.account_id : null,
         batch_number: batch,
+        expiry_date: expiryByBatch.get(batch) ?? null,
         order_line_id: l.id,
-        notes: `${noteLabel} ${refNumber.trim()} — order line ${l.id}`,
-      }))
-    );
+        notes: `${noteLabel} ${noteRef} — order line ${l.id}`,
+      }));
+    });
 
     const { error: moveErr } = await supabase.from("stock_movements").insert(movements);
     if (moveErr) {
@@ -229,14 +263,19 @@ export function OrderFulfillmentModal({
       return;
     }
 
+    // DC = the goods leaving the warehouse for the hospital, not the order
+    // being finished -- it now lands on "Sent to Hospital" (with whatever
+    // tracking info was given) and the hospital confirms Delivered
+    // themselves via the status dropdown. A Saleable order still closes
+    // outright here since attaching its invoice IS the completing event.
     const orderUpdate =
       mode === "dc"
-        ? { status: "closed" as const, dc_number: refNumber.trim(), dc_date: refDate }
-        : { status: "closed" as const, invoice_number: refNumber.trim(), invoice_date: refDate };
+        ? { status: "sent_to_hospital" as const, dc_number: refNumber.trim(), dc_date: refDate, tracking_info: trackingInfo.trim() || null }
+        : { status: "closed" as const, invoice_date: refDate, sales_invoice_url: salesInvoiceUrl };
     const { error: orderErr } = await supabase.from("orders").update(orderUpdate).eq("id", order.id);
     setSaving(false);
     if (orderErr) {
-      setError("Stock was logged, but couldn't close the order: " + orderErr.message);
+      setError("Stock was logged, but couldn't update the order: " + orderErr.message);
       return;
     }
     onDone();
@@ -258,16 +297,38 @@ export function OrderFulfillmentModal({
           item(s).
         </p>
 
-        <div className="mb-4 grid grid-cols-2 gap-3">
-          <div>
-            <label className="field-label">{mode === "dc" ? "DC Number" : "Sales Invoice Number"}</label>
-            <input className="field-input" value={refNumber} onChange={(e) => setRefNumber(e.target.value)} autoFocus />
+        {mode === "dc" ? (
+          <div className="mb-4 grid grid-cols-3 gap-3">
+            <div>
+              <label className="field-label">DC Number</label>
+              <input className="field-input" value={refNumber} onChange={(e) => setRefNumber(e.target.value)} autoFocus />
+            </div>
+            <div>
+              <label className="field-label">DC Date</label>
+              <input type="date" className="field-input" value={refDate} onChange={(e) => setRefDate(e.target.value)} />
+            </div>
+            <div>
+              <label className="field-label">Tracking # / Courier (optional)</label>
+              <input className="field-input" value={trackingInfo} onChange={(e) => setTrackingInfo(e.target.value)} placeholder="e.g. Bluedart 123456" />
+            </div>
           </div>
-          <div>
-            <label className="field-label">{mode === "dc" ? "DC Date" : "Invoice Date"}</label>
-            <input type="date" className="field-input" value={refDate} onChange={(e) => setRefDate(e.target.value)} />
+        ) : (
+          <div className="mb-4 grid grid-cols-2 gap-3">
+            <div>
+              <label className="field-label">Sales Invoice</label>
+              <input
+                type="file"
+                accept="application/pdf,image/*"
+                className="field-input file:mr-2 file:rounded-[3px] file:border-0 file:bg-brand file:px-2 file:py-1 file:text-[11px] file:font-bold file:text-white"
+                onChange={(e) => setInvoiceFile(e.target.files?.[0] ?? null)}
+              />
+            </div>
+            <div>
+              <label className="field-label">Invoice Date</label>
+              <input type="date" className="field-input" value={refDate} onChange={(e) => setRefDate(e.target.value)} />
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="mb-4 space-y-3">
           {order.order_lines.map((l) => {
@@ -333,7 +394,7 @@ export function OrderFulfillmentModal({
 
         <div className="flex gap-2">
           <button type="button" className="btn-primary" disabled={saving} onClick={submit}>
-            {saving ? "Saving…" : "Submit"}
+            {uploading ? "Uploading…" : saving ? "Saving…" : "Submit"}
           </button>
           <button
             type="button"

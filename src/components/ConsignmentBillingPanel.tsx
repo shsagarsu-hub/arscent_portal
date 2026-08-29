@@ -4,6 +4,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { fmtDate, todayISO } from "@/lib/dates";
+import { deletePendingBillingRequest } from "@/app/manager/orders/actions";
+import { sendUsageInvoiceEmailAction } from "@/app/manager/consignment/actions";
 import type { BillingStatus } from "@/lib/supabase/database.types";
 
 interface BillingRow {
@@ -17,6 +19,7 @@ interface BillingRow {
   status: BillingStatus;
   invoice_number: string | null;
   invoice_date: string | null;
+  invoice_attachment_url: string | null;
   account_id: string;
   location_id: string;
   batch_number: string | null;
@@ -122,9 +125,13 @@ export function ConsignmentBillingPanel() {
 
   const [billing, setBilling] = useState<BillingRow[] | null>(null);
   const [invoicingRow, setInvoicingRow] = useState<BillingRow | null>(null);
-  const [invoiceNumber, setInvoiceNumber] = useState("");
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
   const [savingInvoice, setSavingInvoice] = useState(false);
+  const [uploadingInvoice, setUploadingInvoice] = useState(false);
+  const [savedInvoiceUrl, setSavedInvoiceUrl] = useState<string | null>(null);
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<{ ok: boolean; text: string } | null>(null);
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBatchNumber, setEditBatchNumber] = useState("");
@@ -133,12 +140,13 @@ export function ConsignmentBillingPanel() {
   const [savingEdit, setSavingEdit] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkRecording, setBulkRecording] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const loadBilling = useCallback(async () => {
     const { data } = await supabase
       .from("billing_requests")
       .select(
-        "id, usage_log_id, order_line_id, entry_date, qty, unit_price, amount, status, invoice_number, invoice_date, account_id, location_id, batch_number, item_master_id, skus(name), usage_log(note), accounts(label), account_locations(name), item_master(name), order_lines(notes, order_id)"
+        "id, usage_log_id, order_line_id, entry_date, qty, unit_price, amount, status, invoice_number, invoice_date, invoice_attachment_url, account_id, location_id, batch_number, item_master_id, skus(name), usage_log(note), accounts(label), account_locations(name), item_master(name), order_lines(notes, order_id)"
       )
       .in("status", ["pending", "requested"])
       .order("entry_date", { ascending: false })
@@ -203,6 +211,18 @@ export function ConsignmentBillingPanel() {
 
   function isReadyToRecord(row: BillingRow) {
     return !!row.item_master_id && !!row.batch_number;
+  }
+
+  async function deleteRow(row: BillingRow) {
+    if (!confirm(`Delete this pending Usage Log entry (${row.skus?.name ?? "item"}, qty ${row.qty})? This can't be undone.`)) return;
+    setDeletingId(row.id);
+    const res = await deletePendingBillingRequest(row.id);
+    setDeletingId(null);
+    if (!res.success) {
+      alert(res.message);
+      return;
+    }
+    loadBilling();
   }
 
   async function bulkRecord() {
@@ -289,18 +309,32 @@ export function ConsignmentBillingPanel() {
 
   async function submitInvoice() {
     if (!invoicingRow) return;
-    if (!invoiceNumber.trim() || !invoiceDate) {
-      alert("Enter both an invoice number and date.");
+    if (!invoiceFile || !invoiceDate) {
+      alert("Upload the invoice and enter its date.");
       return;
     }
     setSavingInvoice(true);
+    setUploadingInvoice(true);
+    const formData = new FormData();
+    formData.append("file", invoiceFile);
+    formData.append("kind", "usage");
+    const uploadRes = await fetch("/api/manager/invoice-upload", { method: "POST", body: formData });
+    const uploadBody = await uploadRes.json();
+    setUploadingInvoice(false);
+    if (!uploadRes.ok) {
+      setSavingInvoice(false);
+      alert("Couldn't upload the invoice: " + (uploadBody.error ?? "unknown error"));
+      return;
+    }
+    const invoiceUrl: string = uploadBody.url;
+
     const { error } = await supabase
       .from("billing_requests")
       .update({
         status: "billed",
         billed_at: new Date().toISOString(),
-        invoice_number: invoiceNumber.trim(),
         invoice_date: invoiceDate,
+        invoice_attachment_url: invoiceUrl,
       })
       .eq("id", invoicingRow.id);
     if (error) {
@@ -312,9 +346,28 @@ export function ConsignmentBillingPanel() {
       await maybeCloseOrder(invoicingRow.order_lines.order_id);
     }
     setSavingInvoice(false);
-    setInvoicingRow(null);
-    setInvoiceNumber("");
+    setSavedInvoiceUrl(invoiceUrl);
     loadBilling();
+  }
+
+  async function sendInvoiceEmail() {
+    if (!invoicingRow) return;
+    setSendingEmail(true);
+    setEmailStatus(null);
+    const res = await sendUsageInvoiceEmailAction(invoicingRow.id);
+    setSendingEmail(false);
+    if (!res.success) {
+      setEmailStatus({ ok: false, text: res.message });
+      return;
+    }
+    setEmailStatus({ ok: true, text: `Sent to ${res.recipients.join(", ")}.` });
+  }
+
+  function closeInvoiceModal() {
+    setInvoicingRow(null);
+    setInvoiceFile(null);
+    setSavedInvoiceUrl(null);
+    setEmailStatus(null);
   }
 
   const pending = billing?.filter((b) => b.status === "pending") ?? [];
@@ -459,6 +512,14 @@ export function ConsignmentBillingPanel() {
                           >
                             {recordingId === b.id ? "Recording…" : "Record"}
                           </button>
+                          <button
+                            type="button"
+                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-bad-fg"
+                            disabled={deletingId === b.id}
+                            onClick={() => deleteRow(b)}
+                          >
+                            {deletingId === b.id ? "Deleting…" : "Delete"}
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -499,7 +560,9 @@ export function ConsignmentBillingPanel() {
                     className="cursor-pointer hover:bg-cream"
                     onClick={() => {
                       setInvoicingRow(b);
-                      setInvoiceNumber("");
+                      setInvoiceFile(null);
+                      setSavedInvoiceUrl(null);
+                      setEmailStatus(null);
                       setInvoiceDate(todayISO());
                     }}
                   >
@@ -525,34 +588,67 @@ export function ConsignmentBillingPanel() {
       </div>
 
       {invoicingRow && (
-        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" onClick={() => setInvoicingRow(null)}>
+        <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" onClick={closeInvoiceModal}>
           <div className="w-full max-w-sm rounded-[8px] bg-card p-5 shadow-[0_12px_32px_rgba(23,37,68,0.25)]" onClick={(e) => e.stopPropagation()}>
-            <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Enter invoice details</h3>
+            <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Upload invoice</h3>
             <p className="mb-3.5 text-xs text-muted">
               {invoicingRow.accounts?.label ?? "—"}
               {invoicingRow.account_locations?.name ? ` (${invoicingRow.account_locations.name})` : ""} —{" "}
               {invoicingRow.skus?.name ?? "—"} · Qty {invoicingRow.qty} · {fmtDate(invoicingRow.entry_date)}
             </p>
-            <div className="mb-3">
-              <label className="field-label">Invoice Number</label>
-              <input className="field-input" value={invoiceNumber} onChange={(e) => setInvoiceNumber(e.target.value)} autoFocus />
-            </div>
-            <div className="mb-4">
-              <label className="field-label">Invoice Date</label>
-              <input type="date" className="field-input" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
-            </div>
-            <div className="flex gap-2">
-              <button type="button" className="btn-primary" disabled={savingInvoice} onClick={submitInvoice}>
-                {savingInvoice ? "Saving…" : "Submit"}
-              </button>
-              <button
-                type="button"
-                className="rounded-[4px] border border-border bg-card px-3.5 py-1.5 text-xs font-bold text-ink-soft"
-                onClick={() => setInvoicingRow(null)}
-              >
-                Cancel
-              </button>
-            </div>
+            {!savedInvoiceUrl ? (
+              <>
+                <div className="mb-3">
+                  <label className="field-label">Invoice</label>
+                  <input
+                    type="file"
+                    accept="application/pdf,image/*"
+                    className="field-input file:mr-2 file:rounded-[3px] file:border-0 file:bg-brand file:px-2 file:py-1 file:text-[11px] file:font-bold file:text-white"
+                    onChange={(e) => setInvoiceFile(e.target.files?.[0] ?? null)}
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="field-label">Invoice Date</label>
+                  <input type="date" className="field-input" value={invoiceDate} onChange={(e) => setInvoiceDate(e.target.value)} />
+                </div>
+                <div className="flex gap-2">
+                  <button type="button" className="btn-primary" disabled={savingInvoice} onClick={submitInvoice}>
+                    {uploadingInvoice ? "Uploading…" : savingInvoice ? "Saving…" : "Submit"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[4px] border border-border bg-card px-3.5 py-1.5 text-xs font-bold text-ink-soft"
+                    onClick={closeInvoiceModal}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p className="mb-3.5 text-[12.5px] font-semibold text-good-fg">
+                  Invoice saved.{" "}
+                  <a href={savedInvoiceUrl} target="_blank" rel="noreferrer" className="font-bold text-brand hover:underline">
+                    View
+                  </a>
+                </p>
+                {emailStatus && (
+                  <p className={`mb-3.5 text-[11.5px] font-semibold ${emailStatus.ok ? "text-good-fg" : "text-bad-fg"}`}>{emailStatus.text}</p>
+                )}
+                <div className="flex gap-2">
+                  <button type="button" className="btn-primary" disabled={sendingEmail} onClick={sendInvoiceEmail}>
+                    {sendingEmail ? "Sending…" : "Send Invoice Email"}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-[4px] border border-border bg-card px-3.5 py-1.5 text-xs font-bold text-ink-soft"
+                    onClick={closeInvoiceModal}
+                  >
+                    Close
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { AppShell, Empty, Loading } from "./AppShell";
 import { HospitalOrderForm } from "./HospitalOrderForm";
@@ -11,7 +11,7 @@ import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLa
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import type { OrderType } from "@/lib/supabase/database.types";
 import { CartIcon, ClockIcon, DashboardIcon, PencilIcon, ReceiptIcon } from "./icons";
-import { decodeStickerPage, type DecodedSticker } from "@/lib/barcode/decodeStickerPage";
+import { deleteOwnUsageEntry } from "@/app/manager/orders/actions";
 
 // Teal, not blue -- gives the hospital side its own visual identity distinct
 // from the account manager portal's brand-blue, via AppShell's accentColor.
@@ -37,8 +37,14 @@ interface HistoryRow {
 // sitting on consignment at the hospital, down to the exact shipment it
 // arrived on (needed for FIFO draw-down and to trace billing back to the
 // right PO/order-type when Send to Consignment runs later).
+// One specific physical unit still on consignment and not yet logged --
+// one row per real batch/serial (not per order_line), since a single
+// order_line commonly ships several distinct serials at once and each one
+// needs its own exact batch number recorded when it's actually used, not
+// one arbitrary batch shared across however many units are logged.
 interface ConsignmentLine {
-  id: string;
+  key: string; // unique per batch -- `${orderLineId}|${batch}`
+  id: string; // order_line id -- becomes source_order_line_id on the usage_log row / consumption order_line
   orderId: string;
   orderType: OrderType;
   poNumber: string | null;
@@ -47,66 +53,18 @@ interface ConsignmentLine {
   skuName: string;
   itemMasterId: string | null;
   itemName: string | null;
-  suggestedBatch: string | null;
+  batch: string | null;
   netPrice: number | null;
-  remaining: number;
 }
 
 // Consignment lines grouped by item for display -- a hospital doesn't care
-// which shipment a unit arrived on, just "how much of this do I have".
+// which shipment a unit arrived on, just "how much of this do I have" (and,
+// expanded, exactly which batches those units are).
 interface ConsignmentItemRow {
   key: string;
   itemName: string;
   available: number;
-}
-
-// One decoded sticker, resolved against what's actually on consignment.
-// `candidateLineId` is user-editable -- the closest-batch match is a
-// starting suggestion, not committed until the review screen is confirmed.
-interface ScanMatch {
-  key: string; // decoded serial, deduped -- see decodeStickerPage
-  serial: string;
-  exact: boolean;
-  candidateLineId: string | null;
-}
-
-function normalizeBatch(s: string): string {
-  return s.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
-
-function levenshtein(a: string, b: string): number {
-  const dp: number[][] = Array.from({ length: a.length + 1 }, () => new Array(b.length + 1).fill(0));
-  for (let i = 0; i <= a.length; i++) dp[i][0] = i;
-  for (let j = 0; j <= b.length; j++) dp[0][j] = j;
-  for (let i = 1; i <= a.length; i++) {
-    for (let j = 1; j <= b.length; j++) {
-      dp[i][j] = a[i - 1] === b[j - 1] ? dp[i - 1][j - 1] : 1 + Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
-    }
-  }
-  return dp[a.length][b.length];
-}
-
-// The sticker's serial number is what a hospital actually has in hand, so
-// it's matched against suggestedBatch (the real batch_number recorded when
-// that specific shipment was DC'd -- see loadConsignmentLines) rather than
-// relying on FIFO guessing the way manual entry does. A small edit-distance
-// tolerance covers minor photo/decode noise; anything further off is left
-// for the hospital to pick by hand on the review screen instead of risking
-// a wrong match.
-function findClosestLine(serial: string, lines: ConsignmentLine[]): { lineId: string; exact: boolean } | null {
-  const target = normalizeBatch(serial);
-  if (!target) return null;
-  let best: { lineId: string; dist: number } | null = null;
-  for (const line of lines) {
-    if (!line.suggestedBatch || line.remaining <= 0) continue;
-    const candidate = normalizeBatch(line.suggestedBatch);
-    if (!candidate) continue;
-    if (candidate === target) return { lineId: line.id, exact: true };
-    const dist = levenshtein(target, candidate);
-    if (!best || dist < best.dist) best = { lineId: line.id, dist };
-  }
-  if (best && best.dist <= 2) return { lineId: best.lineId, exact: false };
-  return null;
+  batches: ConsignmentLine[];
 }
 
 const CONSUMPTION_TYPE: Record<string, OrderType> = {
@@ -144,6 +102,7 @@ export function HospitalPortal({
 
   const [stats, setStats] = useState({ today: 0, month: 0, allTime: 0 });
   const [history, setHistory] = useState<HistoryRow[] | null>(null);
+  const [deletingHistoryId, setDeletingHistoryId] = useState<string | null>(null);
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
   const [selectedOrder, setSelectedOrder] = useState<OrderRow | null>(null);
 
@@ -156,21 +115,16 @@ export function HospitalPortal({
   // first -- there's no such thing as "ad-hoc" usage of a product that was
   // never shipped to them. So every item still on hand is looked up
   // automatically (see loadConsignmentLines) and listed with how much
-  // remains; the hospital just edits a qty against whatever they used.
+  // remains; the hospital expands an item's sub-stock and marks off the
+  // exact batch(es) actually used, rather than typing an aggregate qty.
   const [consignmentLines, setConsignmentLines] = useState<ConsignmentLine[] | null>(null);
-  // One qty per item, keyed by item_master_id (or sku_id when there's no
-  // catalog item on record) -- draw-down across the underlying shipments is
-  // resolved FIFO at submit time (see submitLog).
-  const [consignmentQty, setConsignmentQty] = useState<Record<string, string>>({});
+  // Which specific batches (ConsignmentLine.key) are marked used -- this
+  // set IS the qty: an item's "qty used" is just how many of its batches
+  // are selected here, so there's no separate aggregate number that could
+  // disagree with which real serials were actually picked.
+  const [selectedBatches, setSelectedBatches] = useState<Set<string>>(new Set());
 
-  // Second input method alongside the manual qty table above -- a photo of
-  // a page of used-lens stickers, each decoded to its GS1 UDI serial number
-  // and matched against what's on consignment. "log" is the default manual
-  // table; "scan" swaps in the camera/upload + review flow below.
-  const [logMode, setLogMode] = useState<"manual" | "scan">("manual");
-  const [scanning, setScanning] = useState(false);
-  const [scanError, setScanError] = useState<string | null>(null);
-  const [scanMatches, setScanMatches] = useState<ScanMatch[]>([]);
+  const [expandedItemKey, setExpandedItemKey] = useState<string | null>(null);
 
   const loadStats = useCallback(async () => {
     const today = todayISO();
@@ -204,11 +158,31 @@ export function HospitalPortal({
     setHistory(data ?? []);
   }, [accountId, locationId, supabase]);
 
+  /** Only ever safe for an entry nothing downstream has touched yet -- the
+   * server action (deleteOwnUsageEntry) is the actual authority on that,
+   * since RLS blocks hospital logins from reading billing_requests to check
+   * status client-side, so this button always shows and just surfaces
+   * whatever the action reports back. */
+  async function deleteHistoryRow(row: HistoryRow) {
+    if (!confirm(`Delete this usage entry (${row.skus?.name ?? "item"}, qty ${row.qty})? This can't be undone.`)) return;
+    setDeletingHistoryId(row.id);
+    const res = await deleteOwnUsageEntry(row.id);
+    setDeletingHistoryId(null);
+    if (!res.success) {
+      setMsg({ text: res.message, ok: false });
+      return;
+    }
+    setMsg({ text: "Entry deleted.", ok: true });
+    loadHistory();
+    loadStats();
+    loadConsignmentLines();
+  }
+
   const loadOrders = useCallback(async () => {
     let q = supabase
       .from("orders")
       .select(
-        "id, order_type, status, account_id, location_id, po_number, po_attachment_url, requested_date, delivery_instruction, comment, created_at, order_lines(id, qty, net_price, notes, skus(name)), account_locations(name)"
+        "id, order_type, status, account_id, location_id, po_number, po_attachment_url, tracking_info, sales_invoice_url, requested_date, delivery_instruction, comment, created_at, order_lines(id, qty, net_price, notes, skus(name)), account_locations(name)"
       )
       .eq("account_id", accountId);
     if (locationId) q = q.eq("location_id", locationId);
@@ -239,16 +213,17 @@ export function HospitalPortal({
 
     const { data: origLines } = await supabase
       .from("order_lines")
-      .select("id, order_id, sku_id, qty, net_price, skus(name)")
+      .select("id, order_id, sku_id, net_price, skus(name)")
       .in("order_id", orderIds);
+    const lineById = new Map((origLines ?? []).map((l) => [l.id, l]));
     const lineIds = (origLines ?? []).map((l) => l.id);
     if (lineIds.length === 0) {
       setConsignmentLines([]);
       return;
     }
 
-    const [{ data: consumedRows }, { data: dcMovements }] = await Promise.all([
-      supabase.from("order_lines").select("source_order_line_id, qty").in("source_order_line_id", lineIds),
+    const [{ data: usageRows }, { data: dcMovements }] = await Promise.all([
+      supabase.from("usage_log").select("source_order_line_id, batch_number").in("source_order_line_id", lineIds),
       supabase
         .from("stock_movements")
         .select("order_line_id, item_id, batch_number, item_master(name)")
@@ -257,38 +232,37 @@ export function HospitalPortal({
         .returns<{ order_line_id: string | null; item_id: string; batch_number: string | null; item_master: { name: string } | null }[]>(),
     ]);
 
-    const usedByLine = new Map<string, number>();
-    (consumedRows ?? []).forEach((r) => {
-      if (!r.source_order_line_id) return;
-      usedByLine.set(r.source_order_line_id, (usedByLine.get(r.source_order_line_id) ?? 0) + (r.qty || 0));
-    });
-    const dcByLine = new Map<string, { itemId: string; itemName: string; batch: string | null }>();
-    (dcMovements ?? []).forEach((m) => {
-      if (!m.order_line_id) return;
-      dcByLine.set(m.order_line_id, { itemId: m.item_id, itemName: m.item_master?.name ?? "", batch: m.batch_number });
-    });
+    // A batch is unavailable once ANY usage_log row (pending or already
+    // Recorded) has logged that exact batch against this line -- exact
+    // match, not a qty tally, so a line's OTHER serials stay available even
+    // after one specific one has been used.
+    const consumedBatchKeys = new Set(
+      (usageRows ?? [])
+        .filter((r) => r.source_order_line_id && r.batch_number)
+        .map((r) => `${r.source_order_line_id}|${r.batch_number}`)
+    );
 
-    const lines: ConsignmentLine[] = (origLines ?? [])
-      .map((l) => {
-        const used = usedByLine.get(l.id) ?? 0;
-        const dc = dcByLine.get(l.id);
-        const order = orderById.get(l.order_id);
+    const lines: ConsignmentLine[] = (dcMovements ?? [])
+      .filter((m): m is typeof m & { order_line_id: string; batch_number: string } => !!m.order_line_id && !!m.batch_number)
+      .filter((m) => !consumedBatchKeys.has(`${m.order_line_id}|${m.batch_number}`))
+      .map((m) => {
+        const origLine = lineById.get(m.order_line_id);
+        const order = origLine ? orderById.get(origLine.order_id) : undefined;
         return {
-          id: l.id,
-          orderId: l.order_id,
+          key: `${m.order_line_id}|${m.batch_number}`,
+          id: m.order_line_id,
+          orderId: origLine?.order_id ?? "",
           orderType: order?.order_type ?? "long_term_consignment",
           poNumber: order?.po_number ?? null,
           dcDate: order?.dc_date ?? null,
-          skuId: l.sku_id,
-          skuName: l.skus?.name ?? "—",
-          itemMasterId: dc?.itemId ?? null,
-          itemName: dc?.itemName ?? null,
-          suggestedBatch: dc?.batch ?? null,
-          netPrice: l.net_price,
-          remaining: l.qty - used,
+          skuId: origLine?.sku_id ?? "",
+          skuName: origLine?.skus?.name ?? "—",
+          itemMasterId: m.item_id,
+          itemName: m.item_master?.name ?? null,
+          batch: m.batch_number,
+          netPrice: origLine?.net_price ?? null,
         };
-      })
-      .filter((l) => l.remaining > 0);
+      });
     setConsignmentLines(lines);
   }, [accountId, supabase]);
 
@@ -299,14 +273,23 @@ export function HospitalPortal({
       const key = l.itemMasterId ?? l.skuId;
       const name = l.itemName || l.skuName;
       const existing = map.get(key);
-      if (existing) existing.available += l.remaining;
-      else map.set(key, { key, itemName: name, available: l.remaining });
+      if (existing) {
+        existing.available += 1;
+        existing.batches.push(l);
+      } else {
+        map.set(key, { key, itemName: name, available: 1, batches: [l] });
+      }
     }
     return Array.from(map.values()).sort((a, b) => a.itemName.localeCompare(b.itemName));
   }, [consignmentLines]);
 
-  function updateConsignmentQty(key: string, value: string) {
-    setConsignmentQty((prev) => ({ ...prev, [key]: value }));
+  function toggleBatchSelected(key: string) {
+    setSelectedBatches((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }
 
   useEffect(() => {
@@ -315,50 +298,26 @@ export function HospitalPortal({
     })();
   }, [loadStats, loadHistory, loadOrders, loadConsignmentLines]);
 
-  /**
-   * Shared by both input methods -- typed-in quantities (submitLog) and
-   * confirmed sticker scans (submitScannedLog) both end up as this same
-   * shape ({line, qtyNum}[]) and go through the exact same usage_log +
-   * consumption-order inserts, so downstream billing/revenue/stock effects
-   * are identical no matter how the entry was captured.
-   */
+  /** Builds the usage_log + consumption-order inserts for the selected batches. */
   async function commitUsageRows(rows: { line: ConsignmentLine; qtyNum: number }[], buildNote: (r: { line: ConsignmentLine; qtyNum: number }) => string) {
     setSaving(true);
     setMsg(null);
 
-    const { error: usageErr } = await supabase.from("usage_log").insert(
-      rows.map((r) => ({
-        account_id: accountId,
-        location_id: locationId ?? logLocationId,
-        sku_id: r.line.skuId,
-        item_master_id: r.line.itemMasterId || null,
-        entry_date: date,
-        qty: r.qtyNum,
-        note: buildNote(r),
-        batch_number: r.line.suggestedBatch ?? "",
-        // The usage_log billing trigger skips creating its own
-        // billing_requests row when this is set -- billing for these
-        // entries runs through the consumption order below instead
-        // (Orders -> Send to Consignment), not automatically.
-        source_order_line_id: r.line.id,
-        logged_by: userId,
-      }))
-    );
-    if (usageErr) {
-      setSaving(false);
-      setMsg({ text: "Couldn't save — " + usageErr.message, ok: false });
-      return false;
-    }
-
     // One consumption order per source order -- a single qty entered for
     // an item can draw from more than one DC shipment (oldest first), and
-    // each shipment keeps its own PO number and order type.
+    // each shipment keeps its own PO number and order type. Created BEFORE
+    // usage_log (below) so each usage_log row can record exactly which
+    // consumption order_line it fed -- the one piece of information a
+    // "delete this entry" action needs to find and remove the matching
+    // order safely, instead of guessing from account/date/qty.
     const groups = new Map<string, { orderType: OrderType; poNumber: string | null; rows: typeof rows }>();
     for (const r of rows) {
       const g = groups.get(r.line.orderId) ?? { orderType: r.line.orderType, poNumber: r.line.poNumber, rows: [] };
       g.rows.push(r);
       groups.set(r.line.orderId, g);
     }
+
+    const orderLineIdByRow = new Map<(typeof rows)[number], string>();
 
     for (const group of groups.values()) {
       const consumptionType = CONSUMPTION_TYPE[group.orderType];
@@ -376,24 +335,57 @@ export function HospitalPortal({
         .single();
       if (orderErr || !consumptionOrder) {
         setSaving(false);
-        setMsg({ text: "Usage was logged, but couldn't create its billing record: " + (orderErr?.message ?? "unknown error"), ok: false });
+        setMsg({ text: "Couldn't create the billing record: " + (orderErr?.message ?? "unknown error"), ok: false });
         return false;
       }
-      const { error: lineErr } = await supabase.from("order_lines").insert(
-        group.rows.map((r) => ({
-          order_id: consumptionOrder.id,
-          sku_id: r.line.skuId,
-          qty: r.qtyNum,
-          net_price: r.line.netPrice,
-          notes: buildNote(r),
-          source_order_line_id: r.line.id,
-        }))
-      );
-      if (lineErr) {
+      const { data: insertedLines, error: lineErr } = await supabase
+        .from("order_lines")
+        .insert(
+          group.rows.map((r) => ({
+            order_id: consumptionOrder.id,
+            sku_id: r.line.skuId,
+            qty: r.qtyNum,
+            net_price: r.line.netPrice,
+            notes: buildNote(r),
+            source_order_line_id: r.line.id,
+          }))
+        )
+        .select("id");
+      if (lineErr || !insertedLines) {
         setSaving(false);
-        setMsg({ text: "Usage was logged, but couldn't create its billing record: " + lineErr.message, ok: false });
+        setMsg({ text: "Couldn't create the billing record: " + (lineErr?.message ?? "unknown error"), ok: false });
         return false;
       }
+      // Safe to zip positionally: a single multi-row INSERT ... RETURNING
+      // preserves input order in both Postgres and PostgREST.
+      group.rows.forEach((r, i) => {
+        if (insertedLines[i]) orderLineIdByRow.set(r, insertedLines[i].id);
+      });
+    }
+
+    const { error: usageErr } = await supabase.from("usage_log").insert(
+      rows.map((r) => ({
+        account_id: accountId,
+        location_id: locationId ?? logLocationId,
+        sku_id: r.line.skuId,
+        item_master_id: r.line.itemMasterId || null,
+        entry_date: date,
+        qty: r.qtyNum,
+        note: buildNote(r),
+        batch_number: r.line.batch ?? "",
+        // The usage_log billing trigger skips creating its own
+        // billing_requests row when this is set -- billing for these
+        // entries runs through the consumption order above instead
+        // (Orders -> Send to Consignment), not automatically.
+        source_order_line_id: r.line.id,
+        consumption_order_line_id: orderLineIdByRow.get(r) ?? null,
+        logged_by: userId,
+      }))
+    );
+    if (usageErr) {
+      setSaving(false);
+      setMsg({ text: "Couldn't save — " + usageErr.message, ok: false });
+      return false;
     }
 
     setSaving(false);
@@ -416,41 +408,17 @@ export function HospitalPortal({
     }
 
     // Every item still on hand from consignment is listed at once (see the
-    // table below); the hospital edits a qty against however many of each
-    // they actually used, and this submits all of them together as one
-    // batch. Draw-down against the underlying shipments (needed to keep
-    // billing traceable back to the right PO/order) is resolved FIFO here,
-    // oldest DC first, entirely behind the scenes.
-    const entries = Object.entries(consignmentQty)
-      .map(([key, v]) => ({ key, qtyNum: parseInt(v, 10) }))
-      .filter((e) => e.qtyNum > 0);
+    // table below); the hospital expands an item's sub-stock and marks off
+    // the exact batch(es) actually used, so there's no FIFO guessing here --
+    // each selected batch is one real, specific serial the hospital
+    // confirmed themselves.
+    const rows: { line: ConsignmentLine; qtyNum: number }[] = (consignmentLines ?? [])
+      .filter((l) => selectedBatches.has(l.key))
+      .map((line) => ({ line, qtyNum: 1 }));
 
-    if (entries.length === 0) {
-      setMsg({ text: "Enter a quantity for at least one item.", ok: false });
+    if (rows.length === 0) {
+      setMsg({ text: "Select at least one batch to log usage for.", ok: false });
       return;
-    }
-
-    const rows: { line: ConsignmentLine; qtyNum: number }[] = [];
-    for (const entry of entries) {
-      const itemLines = (consignmentLines ?? [])
-        .filter((l) => (l.itemMasterId ?? l.skuId) === entry.key)
-        .slice()
-        .sort((a, b) => (a.dcDate ?? "").localeCompare(b.dcDate ?? ""));
-      const totalAvailable = itemLines.reduce((sum, l) => sum + l.remaining, 0);
-      const itemName = itemLines[0]?.itemName || itemLines[0]?.skuName || "that item";
-      if (entry.qtyNum > totalAvailable) {
-        setMsg({ text: `Only ${totalAvailable} available for ${itemName}.`, ok: false });
-        return;
-      }
-      let remainingToAllocate = entry.qtyNum;
-      for (const line of itemLines) {
-        if (remainingToAllocate <= 0) break;
-        const take = Math.min(line.remaining, remainingToAllocate);
-        if (take > 0) {
-          rows.push({ line, qtyNum: take });
-          remainingToAllocate -= take;
-        }
-      }
     }
 
     const noteFor = (r: (typeof rows)[number]) => {
@@ -461,83 +429,7 @@ export function HospitalPortal({
     const ok = await commitUsageRows(rows, noteFor);
     if (ok) {
       setNote("");
-      setConsignmentQty({});
-    }
-  }
-
-  async function handleScanFile(file: File) {
-    setScanning(true);
-    setScanError(null);
-    setScanMatches([]);
-    try {
-      const decoded = await decodeStickerPage(file);
-      if (decoded.length === 0) {
-        setScanError("Couldn't find a readable code on that photo. Try a closer, better-lit shot, or fewer stickers per photo.");
-        return;
-      }
-      const lines = consignmentLines ?? [];
-      const matches: ScanMatch[] = decoded
-        .filter((d): d is DecodedSticker & { serial: string } => !!d.serial)
-        .map((d) => {
-          const match = findClosestLine(d.serial, lines);
-          return { key: d.serial, serial: d.serial, exact: match?.exact ?? false, candidateLineId: match?.lineId ?? null };
-        });
-      if (matches.length === 0) {
-        setScanError("Found a code, but it didn't carry a serial number field. Try a clearer photo of the UDI barcode.");
-        return;
-      }
-      setScanMatches(matches);
-    } catch (err) {
-      setScanError(err instanceof Error ? err.message : "Couldn't read that photo.");
-    } finally {
-      setScanning(false);
-    }
-  }
-
-  function updateScanMatch(key: string, lineId: string) {
-    setScanMatches((prev) => prev.map((m) => (m.key === key ? { ...m, candidateLineId: lineId } : m)));
-  }
-
-  function removeScanMatch(key: string) {
-    setScanMatches((prev) => prev.filter((m) => m.key !== key));
-  }
-
-  async function submitScannedLog() {
-    if (multiCenter && !logLocationId) {
-      setMsg({ text: "Select which center this usage is for.", ok: false });
-      return;
-    }
-    const resolved = scanMatches.filter((m) => m.candidateLineId);
-    if (resolved.length === 0) {
-      setMsg({ text: "Match at least one scanned sticker to a product before logging.", ok: false });
-      return;
-    }
-
-    const lineById = new Map((consignmentLines ?? []).map((l) => [l.id, l]));
-    // Each sticker is one physical lens -- one row, qty 1, per confirmed
-    // match. (Duplicate labels for the very same lens already collapsed to
-    // one entry in decodeStickerPage, keyed by serial.)
-    const rows: { line: ConsignmentLine; qtyNum: number }[] = [];
-    for (const m of resolved) {
-      const line = lineById.get(m.candidateLineId!);
-      if (line) rows.push({ line, qtyNum: 1 });
-    }
-    if (rows.length === 0) {
-      setMsg({ text: "Couldn't find the matched products anymore — refresh and try again.", ok: false });
-      return;
-    }
-
-    const noteFor = (r: (typeof rows)[number]) => {
-      const label = r.line.itemName || r.line.skuName;
-      const scanned = resolved.find((m) => m.candidateLineId === r.line.id);
-      const base = `${label} (scanned SN ${scanned?.serial ?? "—"})`;
-      return note.trim() ? `${base} — ${note.trim()}` : base;
-    };
-
-    const ok = await commitUsageRows(rows, noteFor);
-    if (ok) {
-      setNote("");
-      setScanMatches([]);
+      setSelectedBatches(new Set());
     }
   }
 
@@ -565,32 +457,7 @@ export function HospitalPortal({
           content: (
             <div className="card">
               <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Log usage</h3>
-              <p className="mb-3.5 text-xs text-muted">
-                {logMode === "manual"
-                  ? "Enter the quantity actually used for each consigned product below."
-                  : "Photograph the page of used-lens stickers — each serial number is matched to the closest batch on consignment for you to confirm."}
-              </p>
-
-              <div className="mb-3.5 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setLogMode("manual")}
-                  className={`rounded-[6px] border px-3 py-1.5 text-[12px] font-bold ${
-                    logMode === "manual" ? "border-brand bg-[#eaf1fd] text-brand" : "border-border bg-card text-ink-soft"
-                  }`}
-                >
-                  Manual entry
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLogMode("scan")}
-                  className={`rounded-[6px] border px-3 py-1.5 text-[12px] font-bold ${
-                    logMode === "scan" ? "border-brand bg-[#eaf1fd] text-brand" : "border-border bg-card text-ink-soft"
-                  }`}
-                >
-                  Scan sticker page
-                </button>
-              </div>
+              <p className="mb-3.5 text-xs text-muted">Enter the quantity actually used for each consigned product below.</p>
 
               <div className="mb-3 flex flex-wrap gap-3">
                 <div className="min-w-[150px] flex-1">
@@ -612,8 +479,7 @@ export function HospitalPortal({
                 )}
               </div>
 
-              {logMode === "manual" ? (
-                <form onSubmit={submitLog}>
+              <form onSubmit={submitLog}>
                   <div className="mb-3">
                     <label className="field-label">Stock on consignment{locationName ? "" : ` — ${accountLabel}`}</label>
                     {consignmentRows === null ? (
@@ -627,30 +493,67 @@ export function HospitalPortal({
                         <table className="u-table">
                           <thead>
                             <tr>
+                              <th></th>
                               <th>Product</th>
                               <th>Available</th>
                               <th>Qty used</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {consignmentRows.map((row) => (
-                              <tr key={row.key}>
-                                <td>{row.itemName}</td>
-                                <td>{row.available}</td>
-                                <td>
-                                  <input
-                                    type="number"
-                                    min={0}
-                                    max={row.available}
-                                    step={1}
-                                    className="field-input !py-1 w-24 text-[12px]"
-                                    placeholder="0"
-                                    value={consignmentQty[row.key] ?? ""}
-                                    onChange={(e) => updateConsignmentQty(row.key, e.target.value)}
-                                  />
-                                </td>
-                              </tr>
-                            ))}
+                            {consignmentRows.map((row) => {
+                              const isOpen = expandedItemKey === row.key;
+                              const usedCount = row.batches.filter((b) => selectedBatches.has(b.key)).length;
+                              return (
+                                <Fragment key={row.key}>
+                                  <tr>
+                                    <td>
+                                      <button
+                                        type="button"
+                                        className="text-[11px] font-bold text-muted"
+                                        onClick={() => setExpandedItemKey(isOpen ? null : row.key)}
+                                      >
+                                        {isOpen ? "−" : "+"}
+                                      </button>
+                                    </td>
+                                    <td>{row.itemName}</td>
+                                    <td>{row.available}</td>
+                                    <td className={usedCount > 0 ? "font-bold text-brand" : "text-muted"}>
+                                      {usedCount > 0 ? usedCount : "—"}
+                                    </td>
+                                  </tr>
+                                  {isOpen && (
+                                    <tr>
+                                      <td colSpan={4} className="bg-app/60 !py-2">
+                                        <div className="text-[11px] font-bold uppercase tracking-wide text-muted">
+                                          Sub-stock — click a batch to mark it used
+                                        </div>
+                                        <div className="mt-1.5 flex flex-wrap gap-1.5">
+                                          {row.batches.map((b) => {
+                                            const used = selectedBatches.has(b.key);
+                                            return (
+                                              <button
+                                                type="button"
+                                                key={b.key}
+                                                onClick={() => toggleBatchSelected(b.key)}
+                                                title={b.poNumber ? `PO ${b.poNumber}` : undefined}
+                                                className={
+                                                  used
+                                                    ? "rounded-[4px] border border-brand bg-brand px-2 py-1 font-mono text-[11px] font-bold text-white"
+                                                    : "rounded-[4px] border border-border bg-card px-2 py-1 font-mono text-[11px] text-ink-soft"
+                                                }
+                                              >
+                                                {b.batch ?? "no batch recorded"}
+                                                {used ? " ✓" : ""}
+                                              </button>
+                                            );
+                                          })}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </Fragment>
+                              );
+                            })}
                           </tbody>
                         </table>
                       </div>
@@ -672,106 +575,6 @@ export function HospitalPortal({
                   </button>
                   {msg && <span className={`ml-3 text-xs font-semibold ${msg.ok ? "text-good-fg" : "text-bad-fg"}`}>{msg.text}</span>}
                 </form>
-              ) : (
-                <div>
-                  <div className="mb-3">
-                    <label className="field-label">Photo of the sticker page</label>
-                    <input
-                      type="file"
-                      accept="image/*"
-                      capture="environment"
-                      className="field-input file:mr-2 file:rounded-[3px] file:border-0 file:bg-brand file:px-2 file:py-1 file:text-[11px] file:font-bold file:text-white"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) void handleScanFile(file);
-                        e.target.value = "";
-                      }}
-                    />
-                    {scanning && <p className="mt-1.5 text-[11.5px] text-muted">Reading barcodes…</p>}
-                    {scanError && <p className="mt-1.5 text-[11.5px] font-semibold text-bad-fg">{scanError}</p>}
-                  </div>
-
-                  {scanMatches.length > 0 && (
-                    <div className="mb-3">
-                      <label className="field-label">
-                        {scanMatches.length} sticker{scanMatches.length === 1 ? "" : "s"} found — confirm each match
-                      </label>
-                      <div className="overflow-x-auto rounded-[6px] border border-border">
-                        <table className="u-table">
-                          <thead>
-                            <tr>
-                              <th>Scanned SN</th>
-                              <th>Match</th>
-                              <th>Remaining</th>
-                              <th></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {scanMatches.map((m) => {
-                              const candidateLines = (consignmentLines ?? []).filter((l) => l.remaining > 0);
-                              const selected = candidateLines.find((l) => l.id === m.candidateLineId);
-                              return (
-                                <tr key={m.key}>
-                                  <td className="whitespace-nowrap font-mono text-[11.5px]">{m.serial}</td>
-                                  <td>
-                                    <select
-                                      className="field-input !py-1 text-[12px]"
-                                      value={m.candidateLineId ?? ""}
-                                      onChange={(e) => updateScanMatch(m.key, e.target.value)}
-                                    >
-                                      <option value="">No match — pick manually…</option>
-                                      {candidateLines.map((l) => (
-                                        <option key={l.id} value={l.id}>
-                                          {(l.itemName || l.skuName) + (l.suggestedBatch ? ` — batch ${l.suggestedBatch}` : "")}
-                                        </option>
-                                      ))}
-                                    </select>
-                                    {!m.candidateLineId ? (
-                                      <span className="mt-1 block text-[11px] font-semibold text-bad-fg">No close batch match found</span>
-                                    ) : !m.exact ? (
-                                      <span className="mt-1 block text-[11px] font-semibold text-watch-fg">Closest match, not exact — verify</span>
-                                    ) : null}
-                                  </td>
-                                  <td>{selected?.remaining ?? "—"}</td>
-                                  <td>
-                                    <button
-                                      type="button"
-                                      className="text-[11px] font-bold text-bad-fg"
-                                      onClick={() => removeScanMatch(m.key)}
-                                    >
-                                      Remove
-                                    </button>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-
-                  <div className="mb-3">
-                    <label className="field-label">Note (optional)</label>
-                    <input
-                      type="text"
-                      placeholder="patient case reference, notes"
-                      className="field-input"
-                      value={note}
-                      onChange={(e) => setNote(e.target.value)}
-                    />
-                  </div>
-                  <button
-                    type="button"
-                    className="btn-primary"
-                    disabled={saving || scanMatches.length === 0 || (multiCenter && !logLocationId)}
-                    onClick={() => void submitScannedLog()}
-                  >
-                    {saving ? "Saving…" : `Log ${scanMatches.filter((m) => m.candidateLineId).length || ""} confirmed entr${scanMatches.filter((m) => m.candidateLineId).length === 1 ? "y" : "ies"}`}
-                  </button>
-                  {msg && <span className={`ml-3 text-xs font-semibold ${msg.ok ? "text-good-fg" : "text-bad-fg"}`}>{msg.text}</span>}
-                </div>
-              )}
             </div>
           ),
         },
@@ -802,6 +605,7 @@ export function HospitalPortal({
                         <th>Batch</th>
                         <th>Qty</th>
                         <th>Note</th>
+                        <th></th>
                       </tr>
                     </thead>
                     <tbody>
@@ -813,6 +617,16 @@ export function HospitalPortal({
                           <td>{e.batch_number ?? "—"}</td>
                           <td>{e.qty}</td>
                           <td>{e.note || "—"}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="rounded-[4px] border border-border bg-card px-2 py-1 text-[11px] font-bold text-ink-soft"
+                              disabled={deletingHistoryId === e.id}
+                              onClick={() => void deleteHistoryRow(e)}
+                            >
+                              {deletingHistoryId === e.id ? "Deleting…" : "Delete"}
+                            </button>
+                          </td>
                         </tr>
                       ))}
                     </tbody>
@@ -864,6 +678,7 @@ export function HospitalPortal({
                         <th>Lines</th>
                         <th>Total (ex GST)</th>
                         <th>Status</th>
+                        <th>Sales Invoice</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -895,8 +710,26 @@ export function HospitalPortal({
                             <td>{total.toLocaleString("en-IN")}</td>
                             <td>
                               <span className={`badge ${o.status === "closed" ? "badge-good" : o.status === "cancelled" ? "badge-bad" : "badge-neutral"}`}>
-                                {ORDER_STATUS_LABELS[o.status as keyof typeof ORDER_STATUS_LABELS] ?? o.status}
+                                {ORDER_STATUS_LABELS[o.status] ?? o.status}
                               </span>
+                              {o.status === "sent_to_hospital" && o.tracking_info && (
+                                <div className="mt-0.5 text-[10px] text-muted">{o.tracking_info}</div>
+                              )}
+                            </td>
+                            <td>
+                              {o.sales_invoice_url ? (
+                                <a
+                                  href={o.sales_invoice_url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="font-bold text-brand hover:underline"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  View
+                                </a>
+                              ) : (
+                                "—"
+                              )}
                             </td>
                           </tr>
                         );

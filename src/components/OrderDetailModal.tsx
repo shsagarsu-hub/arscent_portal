@@ -1,8 +1,8 @@
 "use client";
 
-import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
+import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
-import type { OrderType } from "@/lib/supabase/database.types";
+import type { OrderStatus, OrderType } from "@/lib/supabase/database.types";
 
 export interface OrderDetailLine {
   id: string;
@@ -15,11 +15,13 @@ export interface OrderDetailLine {
 export interface OrderDetail {
   id: string;
   order_type: OrderType;
-  status: string;
+  status: OrderStatus;
   account_id: string;
   location_id: string;
   po_number: string | null;
   po_attachment_url: string | null;
+  tracking_info: string | null;
+  sales_invoice_url: string | null;
   requested_date: string | null;
   delivery_instruction: string | null;
   comment: string | null;
@@ -63,14 +65,24 @@ export function OrderDetailModal({ order, onClose }: { order: OrderDetail; onClo
 
         <div className="mb-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
           <Field label="Status">
-            <span className="badge badge-neutral">{order.status}</span>
+            <span className="badge badge-neutral">{ORDER_STATUS_LABELS[order.status] ?? order.status}</span>
           </Field>
           <Field label="Requested Date">{order.requested_date ? new Date(order.requested_date).toLocaleDateString() : "—"}</Field>
           <Field label="PO Number">{order.po_number || "—"}</Field>
           <Field label="Delivery Instruction">{order.delivery_instruction || "—"}</Field>
+          <Field label="Tracking Info">{order.tracking_info || "—"}</Field>
           <Field label="PO Attachment">
             {order.po_attachment_url ? (
               <a href={order.po_attachment_url} target="_blank" rel="noreferrer" className="font-bold text-brand hover:underline">
+                View
+              </a>
+            ) : (
+              "—"
+            )}
+          </Field>
+          <Field label="Sales Invoice">
+            {order.sales_invoice_url ? (
+              <a href={order.sales_invoice_url} target="_blank" rel="noreferrer" className="font-bold text-brand hover:underline">
                 View
               </a>
             ) : (

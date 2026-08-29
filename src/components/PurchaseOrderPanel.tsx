@@ -145,20 +145,17 @@ function ItemPicker({
   );
 }
 
-interface PurchaseMovementRow {
+interface PurchaseOrderLineRow {
   id: string;
+  item_name: string;
   qty: number;
-  notes: string | null;
-  created_at: string;
-  item_master: { name: string } | null;
 }
 
-// \S+ rather than a PO-specific pattern -- once typed in, this also has to
-// match Arscent's real numbering (e.g. "AR/IOLs/26-27/17"), not just the
-// auto-generated fallback format.
-function poNumberFromNotes(notes: string | null): string {
-  const m = notes?.match(/^Zeiss PO (\S+)/);
-  return m ? m[1] : "—";
+interface PurchaseOrderRow {
+  id: string;
+  po_number: string;
+  created_at: string;
+  purchase_order_lines: PurchaseOrderLineRow[];
 }
 
 export function PurchaseOrderPanel() {
@@ -181,7 +178,7 @@ export function PurchaseOrderPanel() {
   const [woLoading, setWoLoading] = useState(false);
   const [woStatus, setWoStatus] = useState<{ ok: boolean; text: string } | null>(null);
 
-  const [recent, setRecent] = useState<PurchaseMovementRow[] | null>(null);
+  const [recent, setRecent] = useState<PurchaseOrderRow[] | null>(null);
   const [recentOpen, setRecentOpen] = useState(false);
   const [expandedPo, setExpandedPo] = useState<string | null>(null);
   const [cancelingPo, setCancelingPo] = useState<string | null>(null);
@@ -211,13 +208,11 @@ export function PurchaseOrderPanel() {
 
   const loadRecent = useCallback(async () => {
     const { data } = await supabase
-      .from("stock_movements")
-      .select("id, qty, notes, created_at, item_master(name)")
-      .eq("category", "purchase_in")
-      .ilike("notes", "Zeiss PO %")
+      .from("purchase_orders")
+      .select("id, po_number, created_at, purchase_order_lines(id, item_name, qty)")
       .order("created_at", { ascending: false })
       .limit(50)
-      .returns<PurchaseMovementRow[]>();
+      .returns<PurchaseOrderRow[]>();
     setRecent(data ?? []);
   }, [supabase]);
 
@@ -225,47 +220,35 @@ export function PurchaseOrderPanel() {
     void loadRecent();
   }, [loadRecent]);
 
-  // Every line of one PO shares the same notes prefix ("Zeiss PO
-  // <poNumber>...") -- there's no dedicated PO table, so that shared prefix
-  // is the only linkage between the individual stock_movements rows a
-  // multi-line PO produces. Grouped here so "Cancel PO" reverses the whole
-  // order in one action instead of one line at a time.
-  const poGroups = useMemo(() => {
-    if (!recent) return [];
-    const map = new Map<string, { poNumber: string; date: string; ids: string[]; totalQty: number; lines: PurchaseMovementRow[] }>();
-    recent.forEach((m) => {
-      const poNumber = poNumberFromNotes(m.notes);
-      const existing = map.get(poNumber);
-      if (existing) {
-        existing.ids.push(m.id);
-        existing.totalQty += m.qty;
-        existing.lines.push(m);
-        if (m.created_at > existing.date) existing.date = m.created_at;
-      } else {
-        map.set(poNumber, { poNumber, date: m.created_at, ids: [m.id], totalQty: m.qty, lines: [m] });
-      }
-    });
-    return Array.from(map.values()).sort((a, b) => b.date.localeCompare(a.date));
-  }, [recent]);
+  // Each purchase_orders row already IS one PO with its own lines -- no more
+  // grouping-by-notes-prefix needed now that a PO is a real row instead of a
+  // shared string tag on stock_movements.
+  const poGroups = useMemo(
+    () =>
+      (recent ?? []).map((po) => ({
+        id: po.id,
+        poNumber: po.po_number,
+        date: po.created_at,
+        totalQty: po.purchase_order_lines.reduce((sum, l) => sum + l.qty, 0),
+        lines: po.purchase_order_lines,
+      })),
+    [recent]
+  );
 
   /**
-   * Deletes every stock_movements row belonging to one PO -- warehouse
-   * stock recomputes live from what's left, so this is the exact reverse of
-   * sending the PO: the quantity comes back out of Purchase In / Balance.
-   * Same direct-delete pattern as Inventory's Recent Movements, just
-   * grouped by PO instead of picked row by row.
+   * Deletes the purchase_orders row (its lines cascade) -- this is just
+   * record-keeping now, not a stock reversal, since raising a PO never
+   * touched stock in the first place.
    */
-  async function cancelPurchaseOrder(group: { poNumber: string; ids: string[]; totalQty: number; lines: PurchaseMovementRow[] }) {
+  async function cancelPurchaseOrder(group: { id: string; poNumber: string; totalQty: number; lines: PurchaseOrderLineRow[] }) {
     if (
-      !confirm(
-        `Cancel PO ${group.poNumber}? This removes all ${group.lines.length} line${group.lines.length === 1 ? "" : "s"} (qty ${group.totalQty}) from Purchase In and reduces warehouse stock accordingly. This can't be undone.`
-      )
+      !confirm(`Cancel PO ${group.poNumber}? This removes the record of this PO (${group.lines.length} line${group.lines.length === 1 ? "" : "s"}, qty ${group.totalQty}). This can't be undone.`)
     ) {
       return;
     }
     setCancelingPo(group.poNumber);
     setCancelStatus(null);
-    const { error } = await supabase.from("stock_movements").delete().in("id", group.ids);
+    const { error } = await supabase.from("purchase_orders").delete().eq("id", group.id);
     setCancelingPo(null);
     if (error) {
       setCancelStatus({ ok: false, text: `Couldn't cancel ${group.poNumber}: ${error.message}` });
@@ -445,8 +428,8 @@ export function PurchaseOrderPanel() {
     }
     const emailNote = res.email.sent
       ? "Email + PDF sent to Zeiss."
-      : `Inventory updated, but the email wasn't sent (${"reason" in res.email ? res.email.reason : res.email.error ?? "unknown reason"}).`;
-    setStatus({ ok: true, text: `${res.poNumber} recorded — warehouse stock updated. ${emailNote}` });
+      : `PO recorded, but the email wasn't sent (${"reason" in res.email ? res.email.reason : res.email.error ?? "unknown reason"}).`;
+    setStatus({ ok: true, text: `${res.poNumber} recorded. ${emailNote}` });
     setLines([emptyLine()]);
     setPoNumber("");
     setNotes(DEFAULT_NOTES);
@@ -468,7 +451,7 @@ export function PurchaseOrderPanel() {
             />
             {recent && recent.length > 0 && (
               <p className="mt-1 text-[11px] text-muted">
-                Last sent: <span className="font-mono">{poNumberFromNotes(recent[0].notes)}</span> on{" "}
+                Last sent: <span className="font-mono">{recent[0].po_number}</span> on{" "}
                 {new Date(recent[0].created_at).toLocaleDateString()}
               </p>
             )}
@@ -608,7 +591,7 @@ export function PurchaseOrderPanel() {
           </div>
 
           <button type="submit" className="btn-primary" disabled={sending}>
-            {sending ? "Sending…" : "Send PO & update inventory"}
+            {sending ? "Sending…" : "Send PO to Zeiss"}
           </button>
           {status && (
             <p className={`mt-2 text-xs font-semibold ${status.ok ? "text-good-fg" : "text-bad-fg"}`}>{status.text}</p>
@@ -685,7 +668,7 @@ export function PurchaseOrderPanel() {
                                     <tbody>
                                       {g.lines.map((l) => (
                                         <tr key={l.id}>
-                                          <td className="whitespace-nowrap">{l.item_master?.name ?? "—"}</td>
+                                          <td className="whitespace-nowrap">{l.item_name}</td>
                                           <td>{l.qty}</td>
                                         </tr>
                                       ))}

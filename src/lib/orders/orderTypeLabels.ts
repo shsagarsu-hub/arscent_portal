@@ -12,16 +12,30 @@ export const ORDER_TYPE_LABELS: Record<OrderType, string> = {
   short_term_consignment_consumption: "ST Consignment Consumption",
 };
 
-// The five OrderStatus values are the same for every order type, but
-// "confirmed"/"shipped" read as jargon on their own -- for a consignment
-// order specifically they mark the two real milestones between placing the
-// order and DC'ing it (raising a PO with Zeiss, then the shipment actually
-// being in transit), so labeling them that way here beats leaving the raw
-// enum value on screen.
+// "confirmed"/"shipped" are the older two-step lifecycle (PO Raised / In
+// Transit) kept only so historical orders still render a real label --
+// every order placed since the lifecycle expanded uses the newer, more
+// granular statuses below instead.
 export const ORDER_STATUS_LABELS: Record<OrderStatus, string> = {
   submitted: "Submitted",
   confirmed: "PO Raised",
   shipped: "In Transit",
+  ordered: "Ordered",
+  received_to_arscent: "Received to Arscent",
+  sent_to_hospital: "Sent to Hospital",
+  delivered: "Delivered",
   closed: "Closed",
   cancelled: "Cancelled",
 };
+
+// The manually-settable subset for the status dropdown -- "closed" is
+// reached automatically (an invoice attached, or every consignment usage
+// line billed), never picked directly, so it's excluded here on purpose.
+export const SETTABLE_ORDER_STATUSES: OrderStatus[] = [
+  "submitted",
+  "ordered",
+  "received_to_arscent",
+  "sent_to_hospital",
+  "delivered",
+  "cancelled",
+];

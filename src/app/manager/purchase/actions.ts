@@ -42,13 +42,14 @@ function newPoNumber(): string {
 }
 
 /**
- * Writes one purchase_in stock_movements row per line (immediately
- * increasing warehouse inventory -- per the account manager's own workflow,
- * placing the PO with Zeiss is the moment stock is committed, not a later
- * goods-receipt step) then best-effort emails the PO to Zeiss. Same ordering
- * as createOrder/notifyOrderPlaced: the inventory effect is committed first
- * and never rolled back by an email failure, since the email is just a
- * notification of something that already happened in the ledger.
+ * Records the PO in purchase_orders/purchase_order_lines (its own real
+ * table, not stock_movements) then best-effort emails the PO to Zeiss.
+ * Deliberately does NOT touch stock -- raising a PO is a commitment to buy,
+ * not a goods receipt. Warehouse stock only ever moves for an actual
+ * receipt (Purchase Invoice import or manual Log Movement) or a sale; an
+ * earlier version of this action wrote a purchase_in row here directly,
+ * which credited stock before the goods had arrived and had to be
+ * corrected (see purchase_orders.sql).
  */
 export async function submitPurchaseOrder(input: SubmitPurchaseInput) {
   const supabase = await createClient();
@@ -69,14 +70,33 @@ export async function submitPurchaseOrder(input: SubmitPurchaseInput) {
 
   const poNumber = input.poNumber?.trim() || newPoNumber();
   const createdAt = new Date().toISOString();
-  const noteTag = `Zeiss PO ${poNumber}${input.notes.trim() ? ` — ${input.notes.trim()}` : ""}`;
 
-  const { error: insertError } = await supabase.from("stock_movements").insert(
+  const { data: po, error: poError } = await supabase
+    .from("purchase_orders")
+    .insert({
+      po_number: poNumber,
+      created_by: user.id,
+      created_at: createdAt,
+      gst_percent: input.gstPercent,
+      delivery: input.delivery || null,
+      payment: input.payment || null,
+      warranty: input.warranty || null,
+      notes: input.notes.trim() || null,
+      to_emails: input.to.join(", "),
+      cc_emails: input.cc.join(", "),
+    })
+    .select("id")
+    .single();
+  if (poError || !po) return { success: false as const, message: poError?.message ?? "Couldn't record the PO." };
+
+  const { error: insertError } = await supabase.from("purchase_order_lines").insert(
     input.lines.map((l) => ({
+      purchase_order_id: po.id,
       item_id: l.itemId,
-      category: "purchase_in" as const,
+      item_name: l.itemName,
       qty: l.qty,
-      notes: noteTag,
+      unit_price: l.unitPrice,
+      hsn: l.hsn.trim() || null,
     }))
   );
   if (insertError) return { success: false as const, message: insertError.message };

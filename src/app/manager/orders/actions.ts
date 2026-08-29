@@ -6,7 +6,12 @@ import { createAdminClient } from "@/lib/supabase/admin";
 import { sendOrderNotification } from "@/lib/email";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
-import type { OrderType } from "@/lib/supabase/database.types";
+import type { BillingStatus, OrderType } from "@/lib/supabase/database.types";
+
+// Domains used only for throwaway test/debug accounts created to drive the
+// portal's own automated browser testing -- never a real inbox, so never a
+// valid notification recipient regardless of what role the account holds.
+const TEST_EMAIL_DOMAINS = ["@arscent-portal.test", "@arscent.local"];
 
 export interface OrderLineInput {
   skuId: string;
@@ -126,6 +131,7 @@ export async function createOrder(input: CreateOrderInput) {
     comment: input.comment,
     createdBy: user.id,
     lines: input.lines,
+    poAttachmentUrl: input.poAttachmentUrl ?? null,
     extraTo: input.extraTo,
     cc: input.cc,
   });
@@ -156,6 +162,7 @@ async function notifyOrderPlaced(input: {
   comment: string;
   createdBy: string;
   lines: OrderLineInput[];
+  poAttachmentUrl?: string | null;
   extraTo?: string[];
   cc?: string[];
 }) {
@@ -174,9 +181,14 @@ async function notifyOrderPlaced(input: {
 
     const emailById = new Map(userList?.users.map((u) => [u.id, u.email]) ?? []);
     const skuNameById = new Map((skuRows ?? []).map((s) => [s.id, s.name]));
+    // Excludes the throwaway accounts created for in-app testing this
+    // project (arscent-portal.test, arscent.local) -- neither domain is a
+    // real deliverable inbox, and both roles were only ever needed to drive
+    // the browser through manager-only screens, not to receive real order
+    // notifications.
     const managerEmails = (managerProfiles ?? [])
       .map((p) => emailById.get(p.id))
-      .filter((e): e is string => !!e);
+      .filter((e): e is string => !!e && !TEST_EMAIL_DOMAINS.some((d) => e.endsWith(d)));
 
     return await sendOrderNotification({
       workOrderNo: workOrderNo(input.orderId, input.createdAt),
@@ -196,6 +208,7 @@ async function notifyOrderPlaced(input: {
       hospitalEmail: emailById.get(input.createdBy) ?? null,
       hospitalName: submitterProfile?.full_name ?? null,
       managerEmails,
+      poAttachmentUrl: input.poAttachmentUrl ?? null,
       extraTo: input.extraTo,
       cc: input.cc,
     });
@@ -266,17 +279,24 @@ export async function sendOrderToConsignment(orderId: string) {
   // for an ad-hoc entry. Pulling it across here means the manager sees the
   // batch already filled in on this row instead of having to look it up and
   // retype it via Edit before Record will allow it through.
-  const sourceLineIds = order.order_lines.map((l) => l.source_order_line_id).filter((id): id is string => !!id);
-  const { data: usageRows } =
-    sourceLineIds.length > 0
-      ? await admin.from("usage_log").select("source_order_line_id, batch_number, item_master_id").in("source_order_line_id", sourceLineIds)
-      : { data: [] };
-  const usageBySourceLine = new Map((usageRows ?? []).map((u) => [u.source_order_line_id, u]));
+  //
+  // Matched via consumption_order_line_id -- the CONSUMPTION order_line's
+  // own id -- not source_order_line_id (the original shipment line), which
+  // is not unique here: a single shipment line commonly gets drawn down
+  // across several usage_log rows, one per physical serial, all sharing the
+  // same source_order_line_id. Keying off that would hand every one of this
+  // order's lines the same arbitrary batch instead of its own.
+  const consumptionLineIds = order.order_lines.map((l) => l.id);
+  const { data: usageRows } = await admin
+    .from("usage_log")
+    .select("consumption_order_line_id, batch_number, item_master_id")
+    .in("consumption_order_line_id", consumptionLineIds);
+  const usageByConsumptionLine = new Map((usageRows ?? []).map((u) => [u.consumption_order_line_id, u]));
 
   const today = new Date().toISOString().slice(0, 10);
   const { error: insertErr } = await admin.from("billing_requests").insert(
     order.order_lines.map((l) => {
-      const usage = l.source_order_line_id ? usageBySourceLine.get(l.source_order_line_id) : undefined;
+      const usage = usageByConsumptionLine.get(l.id);
       return {
         order_line_id: l.id,
         account_id: order.account_id,
@@ -295,6 +315,147 @@ export async function sendOrderToConsignment(orderId: string) {
 
   revalidatePath("/manager");
   return { success: true as const };
+}
+
+interface PendingConsumption {
+  usageLogId: string | null;
+  billingRequestId: string | null;
+  status: BillingStatus;
+  consumptionOrderLineId: string | null;
+  accountId: string;
+  locationId: string;
+}
+
+/** Normalizes the two different rows each portal starts from -- the AM's
+ * ConsignmentBillingPanel already has the billing_requests row (which, for
+ * a PO-linked entry sent to Consignment, has no usage_log_id at all); the
+ * hospital's own history only ever has the usage_log row, which may not
+ * have a billing_requests row yet if it hasn't been sent to Consignment. */
+async function resolvePendingConsumption(
+  admin: ReturnType<typeof createAdminClient>,
+  params: { usageLogId?: string; billingRequestId?: string }
+): Promise<PendingConsumption | null> {
+  if (params.usageLogId) {
+    const { data: usage } = await admin
+      .from("usage_log")
+      .select("id, account_id, location_id, consumption_order_line_id")
+      .eq("id", params.usageLogId)
+      .maybeSingle();
+    if (!usage) return null;
+    const { data: billing } = await admin
+      .from("billing_requests")
+      .select("id, status")
+      .or(
+        usage.consumption_order_line_id
+          ? `usage_log_id.eq.${usage.id},order_line_id.eq.${usage.consumption_order_line_id}`
+          : `usage_log_id.eq.${usage.id}`
+      )
+      .maybeSingle();
+    return {
+      usageLogId: usage.id,
+      billingRequestId: billing?.id ?? null,
+      status: billing?.status ?? "pending",
+      consumptionOrderLineId: usage.consumption_order_line_id,
+      accountId: usage.account_id,
+      locationId: usage.location_id,
+    };
+  }
+  if (params.billingRequestId) {
+    const { data: billing } = await admin
+      .from("billing_requests")
+      .select("id, status, usage_log_id, order_line_id, account_id, location_id")
+      .eq("id", params.billingRequestId)
+      .maybeSingle();
+    if (!billing) return null;
+    return {
+      usageLogId: billing.usage_log_id,
+      billingRequestId: billing.id,
+      status: billing.status,
+      consumptionOrderLineId: billing.order_line_id,
+      accountId: billing.account_id,
+      locationId: billing.location_id,
+    };
+  }
+  return null;
+}
+
+/**
+ * Deletes one still-pending consumption entry, resolved either from the
+ * usage_log side (hospital portal, deleting their own mistaken "Log Usage"
+ * entry) or the billing_requests side (AM portal's Usage Log). An account
+ * manager/admin can delete any account's entry; a hospital user only their
+ * own account's (and own center's, unless their login is account-wide).
+ *
+ * Deliberately restricted to "pending" -- once a manager has clicked Record,
+ * a real stock_movements row exists, and deleting the log entry underneath
+ * it would silently leave stale/incorrect stock data, the same class of bug
+ * this session already had to fix once (the LVPEI duplicate-serial DC bug).
+ * An already-Recorded entry has to be corrected deliberately, not deleted
+ * in passing.
+ */
+async function deletePendingConsumption(params: { usageLogId?: string; billingRequestId?: string }) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { success: false as const, message: "Not signed in." };
+
+  const { data: profile } = await supabase.from("profiles").select("role, account_id, location_id").eq("id", user.id).maybeSingle();
+  if (!profile) return { success: false as const, message: "Not authorized." };
+
+  const admin = createAdminClient();
+  const entry = await resolvePendingConsumption(admin, params);
+  if (!entry) return { success: false as const, message: "Entry not found." };
+
+  const isManager = profile.role === "account_manager" || profile.role === "admin";
+  const isOwnHospital =
+    profile.role === "hospital" &&
+    profile.account_id === entry.accountId &&
+    (profile.location_id === null || profile.location_id === entry.locationId);
+  if (!isManager && !isOwnHospital) return { success: false as const, message: "Not authorized." };
+
+  if (entry.status !== "pending") {
+    return {
+      success: false as const,
+      message: "This entry has already been recorded — it can no longer be deleted here.",
+    };
+  }
+
+  if (entry.billingRequestId) {
+    const { error } = await admin.from("billing_requests").delete().eq("id", entry.billingRequestId);
+    if (error) return { success: false as const, message: error.message };
+  }
+
+  if (entry.consumptionOrderLineId) {
+    const { data: line } = await admin.from("order_lines").select("order_id").eq("id", entry.consumptionOrderLineId).maybeSingle();
+    const { error: lineErr } = await admin.from("order_lines").delete().eq("id", entry.consumptionOrderLineId);
+    if (lineErr) return { success: false as const, message: lineErr.message };
+    if (line?.order_id) {
+      const { data: remaining } = await admin.from("order_lines").select("id").eq("order_id", line.order_id);
+      if (!remaining || remaining.length === 0) {
+        await admin.from("orders").delete().eq("id", line.order_id);
+      }
+    }
+  }
+
+  if (entry.usageLogId) {
+    const { error: delUsageErr } = await admin.from("usage_log").delete().eq("id", entry.usageLogId);
+    if (delUsageErr) return { success: false as const, message: delUsageErr.message };
+  }
+
+  revalidatePath("/manager");
+  revalidatePath("/hospital");
+  return { success: true as const };
+}
+
+/** Hospital portal: delete a usage entry the hospital logged themselves. */
+export async function deleteOwnUsageEntry(usageLogId: string) {
+  return deletePendingConsumption({ usageLogId });
+}
+
+/** AM portal: delete a pending Usage Log row from ConsignmentBillingPanel. */
+export async function deletePendingBillingRequest(billingRequestId: string) {
+  return deletePendingConsumption({ billingRequestId });
 }
 
 export interface ConsignmentBalanceLine {

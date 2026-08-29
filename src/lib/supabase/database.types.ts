@@ -21,7 +21,16 @@ export type OrderType =
   | "long_term_consignment_consumption"
   | "short_term_consignment"
   | "short_term_consignment_consumption";
-export type OrderStatus = "submitted" | "confirmed" | "shipped" | "cancelled" | "closed";
+export type OrderStatus =
+  | "submitted"
+  | "confirmed"
+  | "shipped"
+  | "cancelled"
+  | "closed"
+  | "ordered"
+  | "received_to_arscent"
+  | "sent_to_hospital"
+  | "delivered";
 export type MovementCategory =
   | "purchase_in"
   | "dc_out"
@@ -95,6 +104,7 @@ export type UsageLog = {
   batch_number: string;
   item_master_id: string | null;
   source_order_line_id: string | null;
+  consumption_order_line_id: string | null;
   logged_by: string | null;
   created_at: string;
 };
@@ -115,6 +125,7 @@ export type BillingRequest = {
   billed_at: string | null;
   invoice_number: string | null;
   invoice_date: string | null;
+  invoice_attachment_url: string | null;
   batch_number: string | null;
   item_master_id: string | null;
   created_at: string;
@@ -138,6 +149,8 @@ export type Order = {
   po_attachment_url: string | null;
   invoice_number: string | null;
   invoice_date: string | null;
+  sales_invoice_url: string | null;
+  tracking_info: string | null;
   dc_number: string | null;
   dc_date: string | null;
   created_by: string | null;
@@ -200,6 +213,30 @@ export type StockBalanceByBatch = StockBalance & {
   expiry_date: string | null;
 };
 
+export type PurchaseOrder = {
+  id: string;
+  po_number: string;
+  created_by: string | null;
+  created_at: string;
+  gst_percent: number | null;
+  delivery: string | null;
+  payment: string | null;
+  warranty: string | null;
+  notes: string | null;
+  to_emails: string | null;
+  cc_emails: string | null;
+};
+
+export type PurchaseOrderLine = {
+  id: string;
+  purchase_order_id: string;
+  item_id: string | null;
+  item_name: string;
+  qty: number;
+  unit_price: number | null;
+  hsn: string | null;
+};
+
 export type TallyInvoiceLine = {
   id: string;
   invoice_no: string;
@@ -241,6 +278,35 @@ export type CommitmentAdjustment = {
   note_no: string | null;
   raised_date: string | null;
   created_at: string;
+};
+
+export type AssetCategory = "capital_equipment" | "benefit_equipment" | "cmc_support" | "other";
+export type AssetStatus = "pending" | "po_raised" | "delivered" | "invoiced" | "payment_received" | "closed";
+
+export type Asset = {
+  id: string;
+  account_id: string;
+  location_id: string | null;
+  asset_name: string;
+  category: AssetCategory;
+  agreement_reference: string | null;
+  serial_number: string | null;
+  equipment_value: number | null;
+  invoice_value: number | null;
+  po_raised_to_zeiss: boolean;
+  po_to_zeiss_number: string | null;
+  po_to_zeiss_date: string | null;
+  payment_received_from_hospital: boolean;
+  payment_received_amount: number | null;
+  payment_received_date: string | null;
+  po_received_from_hospital: boolean;
+  po_from_hospital_number: string | null;
+  po_from_hospital_date: string | null;
+  po_from_hospital_price: number | null;
+  status: AssetStatus;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 export type ConsignmentBalance = {
@@ -392,6 +458,7 @@ export interface Database {
           batch_number: string;
           item_master_id?: string | null;
           source_order_line_id?: string | null;
+          consumption_order_line_id?: string | null;
           logged_by?: string | null;
           created_at?: string;
         };
@@ -406,6 +473,7 @@ export interface Database {
           batch_number?: string;
           item_master_id?: string | null;
           source_order_line_id?: string | null;
+          consumption_order_line_id?: string | null;
           logged_by?: string | null;
           created_at?: string;
         };
@@ -465,6 +533,7 @@ export interface Database {
           billed_at?: string | null;
           invoice_number?: string | null;
           invoice_date?: string | null;
+          invoice_attachment_url?: string | null;
           batch_number?: string | null;
           item_master_id?: string | null;
           created_at?: string;
@@ -485,6 +554,7 @@ export interface Database {
           billed_at?: string | null;
           invoice_number?: string | null;
           invoice_date?: string | null;
+          invoice_attachment_url?: string | null;
           batch_number?: string | null;
           item_master_id?: string | null;
           created_at?: string;
@@ -547,6 +617,8 @@ export interface Database {
           po_attachment_url?: string | null;
           invoice_number?: string | null;
           invoice_date?: string | null;
+          sales_invoice_url?: string | null;
+          tracking_info?: string | null;
           dc_number?: string | null;
           dc_date?: string | null;
           created_by?: string | null;
@@ -571,6 +643,8 @@ export interface Database {
           po_attachment_url?: string | null;
           invoice_number?: string | null;
           invoice_date?: string | null;
+          sales_invoice_url?: string | null;
+          tracking_info?: string | null;
           dc_number?: string | null;
           dc_date?: string | null;
           created_by?: string | null;
@@ -873,6 +947,150 @@ export interface Database {
             columns: ["sku_id"];
             isOneToOne: false;
             referencedRelation: "skus";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      assets: {
+        Row: Asset;
+        Insert: {
+          id?: string;
+          account_id: string;
+          location_id?: string | null;
+          asset_name: string;
+          category?: AssetCategory;
+          agreement_reference?: string | null;
+          serial_number?: string | null;
+          equipment_value?: number | null;
+          invoice_value?: number | null;
+          po_raised_to_zeiss?: boolean;
+          po_to_zeiss_number?: string | null;
+          po_to_zeiss_date?: string | null;
+          payment_received_from_hospital?: boolean;
+          payment_received_amount?: number | null;
+          payment_received_date?: string | null;
+          po_received_from_hospital?: boolean;
+          po_from_hospital_number?: string | null;
+          po_from_hospital_date?: string | null;
+          po_from_hospital_price?: number | null;
+          status?: AssetStatus;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Update: {
+          id?: string;
+          account_id?: string;
+          location_id?: string | null;
+          asset_name?: string;
+          category?: AssetCategory;
+          agreement_reference?: string | null;
+          serial_number?: string | null;
+          equipment_value?: number | null;
+          invoice_value?: number | null;
+          po_raised_to_zeiss?: boolean;
+          po_to_zeiss_number?: string | null;
+          po_to_zeiss_date?: string | null;
+          payment_received_from_hospital?: boolean;
+          payment_received_amount?: number | null;
+          payment_received_date?: string | null;
+          po_received_from_hospital?: boolean;
+          po_from_hospital_number?: string | null;
+          po_from_hospital_date?: string | null;
+          po_from_hospital_price?: number | null;
+          status?: AssetStatus;
+          notes?: string | null;
+          created_at?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "assets_account_id_fkey";
+            columns: ["account_id"];
+            isOneToOne: false;
+            referencedRelation: "accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "assets_location_id_fkey";
+            columns: ["location_id"];
+            isOneToOne: false;
+            referencedRelation: "account_locations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      purchase_orders: {
+        Row: PurchaseOrder;
+        Insert: {
+          id?: string;
+          po_number: string;
+          created_by?: string | null;
+          created_at?: string;
+          gst_percent?: number | null;
+          delivery?: string | null;
+          payment?: string | null;
+          warranty?: string | null;
+          notes?: string | null;
+          to_emails?: string | null;
+          cc_emails?: string | null;
+        };
+        Update: {
+          id?: string;
+          po_number?: string;
+          created_by?: string | null;
+          created_at?: string;
+          gst_percent?: number | null;
+          delivery?: string | null;
+          payment?: string | null;
+          warranty?: string | null;
+          notes?: string | null;
+          to_emails?: string | null;
+          cc_emails?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "purchase_orders_created_by_fkey";
+            columns: ["created_by"];
+            isOneToOne: false;
+            referencedRelation: "profiles";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      purchase_order_lines: {
+        Row: PurchaseOrderLine;
+        Insert: {
+          id?: string;
+          purchase_order_id: string;
+          item_id?: string | null;
+          item_name: string;
+          qty: number;
+          unit_price?: number | null;
+          hsn?: string | null;
+        };
+        Update: {
+          id?: string;
+          purchase_order_id?: string;
+          item_id?: string | null;
+          item_name?: string;
+          qty?: number;
+          unit_price?: number | null;
+          hsn?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "purchase_order_lines_purchase_order_id_fkey";
+            columns: ["purchase_order_id"];
+            isOneToOne: false;
+            referencedRelation: "purchase_orders";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "purchase_order_lines_item_id_fkey";
+            columns: ["item_id"];
+            isOneToOne: false;
+            referencedRelation: "item_master";
             referencedColumns: ["id"];
           },
         ];

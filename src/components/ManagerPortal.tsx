@@ -9,6 +9,7 @@ import { DashboardPanel } from "./DashboardPanel";
 import { OrderDetailModal, type OrderDetail } from "./OrderDetailModal";
 import { OrderFulfillmentModal } from "./OrderFulfillmentModal";
 import { RaisePoModal } from "./RaisePoModal";
+import { OrderStatusDropdown } from "./OrderStatusDropdown";
 import { ConsignmentBillingPanel } from "./ConsignmentBillingPanel";
 import { PurchaseOrderPanel } from "./PurchaseOrderPanel";
 import { ReceivablesPanel } from "./ReceivablesPanel";
@@ -20,7 +21,8 @@ import { monthBounds, thisMonthISO } from "@/lib/dates";
 import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { sendOrderToConsignment } from "@/app/manager/orders/actions";
-import { BoxIcon, BuildingIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TruckIcon, UploadIcon } from "./icons";
+import { BoxIcon, BuildingIcon, ClipboardIcon, DashboardIcon, ReceiptIcon, TagIcon, TruckIcon, UploadIcon } from "./icons";
+import { AssetRegisterPanel } from "./AssetRegisterPanel";
 
 interface SkuRow {
   id: string;
@@ -87,7 +89,6 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   const [sendingOrderId, setSendingOrderId] = useState<string | null>(null);
   const [fulfilling, setFulfilling] = useState<{ order: OrderRow; mode: "dc" | "invoice" } | null>(null);
   const [raisingPoFor, setRaisingPoFor] = useState<OrderRow | null>(null);
-  const [markingTransitId, setMarkingTransitId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     // months may be a non-contiguous set (e.g. Jun + Aug, skipping Jul), so
@@ -157,7 +158,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       supabase
         .from("orders")
         .select(
-          "id, order_type, status, account_id, location_id, po_number, po_attachment_url, requested_date, delivery_instruction, comment, created_at, accounts(label), account_locations(name), order_lines(id, qty, net_price, notes, skus(name))"
+          "id, order_type, status, account_id, location_id, po_number, po_attachment_url, tracking_info, sales_invoice_url, requested_date, delivery_instruction, comment, created_at, accounts(label), account_locations(name), order_lines(id, qty, net_price, notes, skus(name))"
         )
         .order("created_at", { ascending: false })
         .limit(50)
@@ -202,21 +203,6 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       return;
     }
     if (selectedOrder?.id === o.id) setSelectedOrder(null);
-    load();
-  }
-
-  // No automated signal exists for "the courier has picked this up" -- the
-  // account manager marks it by hand once they know Zeiss has actually
-  // dispatched it, same as the real paperwork this mirrors.
-  async function markInTransit(o: OrderRow, e: React.MouseEvent) {
-    e.stopPropagation();
-    setMarkingTransitId(o.id);
-    const { error } = await supabase.from("orders").update({ status: "shipped" }).eq("id", o.id);
-    setMarkingTransitId(null);
-    if (error) {
-      alert("Couldn't update the order: " + error.message);
-      return;
-    }
     load();
   }
 
@@ -442,12 +428,14 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
                             </td>
                             <td>{o.order_lines.length}</td>
                             <td>{total.toLocaleString("en-IN")}</td>
-                            <td>
-                              <span
-                                className={`badge ${o.status === "closed" ? "badge-good" : o.status === "cancelled" ? "badge-bad" : "badge-neutral"}`}
-                              >
-                                {ORDER_STATUS_LABELS[o.status as keyof typeof ORDER_STATUS_LABELS] ?? o.status}
-                              </span>
+                            <td onClick={(e) => e.stopPropagation()}>
+                              {o.status === "closed" || o.status === "cancelled" ? (
+                                <span className={`badge ${o.status === "closed" ? "badge-good" : "badge-bad"}`}>
+                                  {ORDER_STATUS_LABELS[o.status]}
+                                </span>
+                              ) : (
+                                <OrderStatusDropdown orderId={o.id} status={o.status} trackingInfo={o.tracking_info} onChanged={load} />
+                              )}
                             </td>
                             <td className="whitespace-nowrap">
                               <div className="flex gap-1.5">
@@ -465,26 +453,18 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
                                       >
                                         Raise PO
                                       </button>
-                                      {o.status === "confirmed" && (
+                                      {o.status !== "sent_to_hospital" && o.status !== "delivered" && (
                                         <button
                                           type="button"
-                                          className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
-                                          disabled={markingTransitId === o.id}
-                                          onClick={(e) => void markInTransit(o, e)}
+                                          className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            setFulfilling({ order: o, mode: "dc" });
+                                          }}
                                         >
-                                          {markingTransitId === o.id ? "Updating…" : "Mark In Transit"}
+                                          Enter DC
                                         </button>
                                       )}
-                                      <button
-                                        type="button"
-                                        className="btn-primary !px-2.5 !py-1 text-[11px]"
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          setFulfilling({ order: o, mode: "dc" });
-                                        }}
-                                      >
-                                        Enter DC
-                                      </button>
                                     </>
                                   )}
                                 {o.order_type === "saleable" && o.status !== "cancelled" && o.status !== "closed" && (
@@ -549,6 +529,12 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
           label: "Consignment",
           icon: <ReceiptIcon />,
           content: <ConsignmentBillingPanel />,
+        },
+        {
+          id: "assets",
+          label: "Assets",
+          icon: <TagIcon />,
+          content: <AssetRegisterPanel />,
         },
       ]}
     />

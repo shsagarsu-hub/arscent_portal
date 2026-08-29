@@ -107,6 +107,15 @@ export function TruckIcon() {
   );
 }
 
+export function TagIcon() {
+  return (
+    <Svg>
+      <path d="M10.5 2.5h5.2a1 1 0 0 1 1 1v5.2a1 1 0 0 1-.3.7l-8 8a1 1 0 0 1-1.4 0l-5.2-5.2a1 1 0 0 1 0-1.4l8-8a1 1 0 0 1 .7-.3Z" strokeLinejoin="round" />
+      <circle cx="13.5" cy="6.5" r="1.2" />
+    </Svg>
+  );
+}
+
 export function ReceiptIcon() {
   return (
     <Svg>

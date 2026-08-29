@@ -39,9 +39,15 @@ export interface OrderEmailInput {
   hospitalEmail: string | null;
   hospitalName: string | null;
   managerEmails: string[];
+  poAttachmentUrl?: string | null;
   extraTo?: string[];
   cc?: string[];
 }
+
+// Matches PurchaseOrderPanel's own DEFAULT_GST -- no per-order GST rate is
+// captured on `orders` today (only `tax_code`, a free-text field), so this
+// is the same standing assumption already used for the Zeiss PO side.
+const DEFAULT_GST_PERCENT = 5;
 
 export interface SendResult {
   sent: boolean;
@@ -111,8 +117,10 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
         <tbody>${rows}</tbody>
       </table>
       <p style="margin-top: 12px; font-weight: bold;">Total (ex GST): ${total.toLocaleString("en-IN")}</p>
+      <p style="margin: 2px 0 0; font-weight: bold;">Total (incl. GST @ ${DEFAULT_GST_PERCENT}%): ${(total * (1 + DEFAULT_GST_PERCENT / 100)).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</p>
       <p style="margin-top: 20px; color: #6b7c9e; font-size: 12px;">
         Submitted by ${escapeHtml(input.hospitalName ?? "a hospital user")} on ${new Date(input.createdAt).toLocaleString("en-IN")}.
+        ${input.poAttachmentUrl ? " The hospital's PO copy is attached." : ""}
       </p>
     </div>
   `;
@@ -132,10 +140,66 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
       cc: cc.length > 0 ? cc : undefined,
       subject: `Order ${input.workOrderNo} — ${input.accountLabel}`,
       html,
+      // po-attachments is a public Storage bucket (see
+      // /api/hospital/po-upload), so nodemailer can fetch it directly by
+      // URL instead of us downloading and re-buffering it here.
+      attachments: input.poAttachmentUrl ? [{ filename: "PO copy" + fileExt(input.poAttachmentUrl), path: input.poAttachmentUrl }] : undefined,
     });
     return { sent: true, recipients: [...recipients, ...cc] };
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients };
+  }
+}
+
+export interface UsageInvoiceEmailInput {
+  accountLabel: string;
+  locationName: string | null;
+  skuName: string;
+  qty: number;
+  entryDate: string;
+  to: string[];
+  invoiceUrl: string;
+}
+
+/**
+ * Sends one consignment usage entry's invoice to the hospital -- fired from
+ * the "Send Invoice Email" button next to that entry in Pending Invoice,
+ * once the invoice file has been uploaded there. Same no-op-without-
+ * credentials and attach-by-URL behavior as the other email senders here.
+ */
+export async function sendUsageInvoiceEmail(input: UsageInvoiceEmailInput): Promise<SendResult> {
+  const transporter = getTransporter();
+
+  if (!transporter) {
+    console.warn(`[email] GMAIL_USER/GMAIL_APP_PASSWORD not set -- skipped usage invoice email (would have gone to: ${input.to.join(", ") || "nobody resolved"})`);
+    return { sent: false, reason: "Gmail sender not configured", recipients: input.to };
+  }
+  if (input.to.length === 0) {
+    return { sent: false, reason: "no recipients resolved", recipients: [] };
+  }
+
+  const entryDateLabel = new Date(input.entryDate).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #172544; max-width: 560px;">
+      <p style="margin: 0 0 16px;">Dear Team,</p>
+      <p style="margin: 0 0 16px;">PFA the invoice for usage dated ${entryDateLabel} (${escapeHtml(input.skuName)}, qty ${input.qty}).</p>
+      <p style="margin: 24px 0 0; color: #6b7c9e; font-size: 11px;">
+        ${escapeHtml(input.accountLabel)}${input.locationName ? ` — ${escapeHtml(input.locationName)}` : ""}
+      </p>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"Arscent Orders" <${GMAIL_USER}>`,
+      to: input.to,
+      subject: `Usage Invoice — ${input.accountLabel}${input.locationName ? ` (${input.locationName})` : ""} — ${entryDateLabel}`,
+      html,
+      attachments: [{ filename: "Invoice" + fileExt(input.invoiceUrl), path: input.invoiceUrl }],
+    });
+    return { sent: true, recipients: input.to };
+  } catch (err) {
+    return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: input.to };
   }
 }
 
@@ -210,6 +274,11 @@ export async function sendPurchaseOrderEmail(input: PurchaseOrderEmailInput): Pr
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: input.to };
   }
+}
+
+function fileExt(url: string): string {
+  const match = /\.([a-zA-Z0-9]{2,5})(?:\?|$)/.exec(url);
+  return match ? `.${match[1]}` : "";
 }
 
 function escapeHtml(s: string): string {

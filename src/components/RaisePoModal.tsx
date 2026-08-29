@@ -124,10 +124,8 @@ export function RaisePoModal({ order, onClose, onDone }: { order: OrderDetail; o
       setError(res.message);
       return;
     }
-    // Stamp the order itself with the PO that now covers it -- "confirmed"
-    // reads as "PO Raised" everywhere this app shows order status (see
-    // ORDER_STATUS_LABELS in ManagerPortal).
-    const { error: updateErr } = await supabase.from("orders").update({ status: "confirmed", po_number: res.poNumber }).eq("id", order.id);
+    // Stamp the order itself with the PO that now covers it.
+    const { error: updateErr } = await supabase.from("orders").update({ status: "ordered", po_number: res.poNumber }).eq("id", order.id);
     setSending(false);
     if (updateErr) {
       setError(`PO ${res.poNumber} was sent, but the order couldn't be updated: ${updateErr.message}`);
@@ -225,7 +223,7 @@ export function RaisePoModal({ order, onClose, onDone }: { order: OrderDetail; o
 
         <div className="flex gap-2">
           <button type="button" className="btn-primary" disabled={sending || !lines || !allResolved} onClick={submit}>
-            {sending ? "Sending…" : "Send PO & update inventory"}
+            {sending ? "Sending…" : "Send PO to Zeiss"}
           </button>
           <button
             type="button"

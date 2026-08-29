@@ -16,6 +16,10 @@ import {
 } from "recharts";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
+import { ExportButton } from "./ExportButton";
+import { workOrderNo } from "@/lib/orders/workOrderNo";
+import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
+import type { OrderStatus, OrderType } from "@/lib/supabase/database.types";
 
 interface UsageRow {
   entry_date: string;
@@ -26,14 +30,24 @@ interface UsageRow {
 interface OrderLineRow {
   qty: number;
   net_price: number | null;
+  notes: string | null;
+  skus: { name: string } | null;
 }
 
-interface OrderRow {
+interface OrderExportRow {
   id: string;
-  status: string;
+  order_type: OrderType;
+  status: OrderStatus;
+  po_number: string | null;
   created_at: string;
   order_lines: OrderLineRow[];
 }
+
+// Matches the same standing default used for the Zeiss PO email and the
+// order-notification email -- orders here carry no per-order GST rate of
+// their own (`tax_code` is free text, not a number), so this is the
+// existing app-wide assumption, not a new one introduced for this export.
+const EXPORT_GST_PERCENT = 5;
 
 const TEAL = "#0e9488";
 const TEAL_DARK = "#0a6d63";
@@ -132,19 +146,22 @@ function ChartCard({
 export function HospitalReportPanel({ accountId, locationId }: { accountId: string; locationId: string | null }) {
   const supabase = createClient();
   const [usage, setUsage] = useState<UsageRow[] | null>(null);
-  const [orders, setOrders] = useState<OrderRow[] | null>(null);
+  const [orders, setOrders] = useState<OrderExportRow[] | null>(null);
   const [period, setPeriod] = useState("12");
 
   const load = useCallback(async () => {
     let usageQ = supabase.from("usage_log").select("entry_date, qty, skus(name)").eq("account_id", accountId);
-    let ordersQ = supabase.from("orders").select("id, status, created_at, order_lines(qty, net_price)").eq("account_id", accountId);
+    let ordersQ = supabase
+      .from("orders")
+      .select("id, order_type, status, po_number, created_at, order_lines(qty, net_price, notes, skus(name))")
+      .eq("account_id", accountId);
     if (locationId) {
       usageQ = usageQ.eq("location_id", locationId);
       ordersQ = ordersQ.eq("location_id", locationId);
     }
     const [{ data: usageRows }, { data: orderRows }] = await Promise.all([
       usageQ.returns<UsageRow[]>(),
-      ordersQ.returns<OrderRow[]>(),
+      ordersQ.returns<OrderExportRow[]>(),
     ]);
     setUsage(usageRows ?? []);
     setOrders(orderRows ?? []);
@@ -231,6 +248,34 @@ export function HospitalReportPanel({ accountId, locationId }: { accountId: stri
     };
   }, [filteredUsage, filteredOrders]);
 
+  // One row per order line -- PO number, price, and GST are only meaningful
+  // at that granularity (a saleable order can carry several different
+  // SKUs/prices under one work order number).
+  const orderExportRows = useMemo(
+    () =>
+      filteredOrders.flatMap((o) =>
+        o.order_lines.map((l) => {
+          const lineTotal = l.qty * (l.net_price ?? 0);
+          const gstAmount = lineTotal * (EXPORT_GST_PERCENT / 100);
+          return {
+            workOrderNo: workOrderNo(o.id, o.created_at),
+            date: new Date(o.created_at).toLocaleDateString("en-IN"),
+            type: ORDER_TYPE_LABELS[o.order_type] ?? o.order_type,
+            status: ORDER_STATUS_LABELS[o.status] ?? o.status,
+            poNumber: o.po_number ?? "",
+            sku: l.skus?.name ?? "—",
+            spec: l.notes ?? "",
+            qty: l.qty,
+            netPrice: l.net_price ?? "",
+            lineTotalExGst: lineTotal,
+            gstPercent: EXPORT_GST_PERCENT,
+            lineTotalInclGst: lineTotal + gstAmount,
+          };
+        })
+      ),
+    [filteredOrders]
+  );
+
   if (usage === null || orders === null) return <Loading />;
 
   return (
@@ -251,17 +296,38 @@ export function HospitalReportPanel({ accountId, locationId }: { accountId: stri
                 : "Usage and orders across every center on your account — nothing from other hospitals."}
             </p>
           </div>
-          <select
-            className="rounded-[6px] border-0 bg-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-white outline-none [color-scheme:dark]"
-            value={period}
-            onChange={(e) => setPeriod(e.target.value)}
-          >
-            {PERIODS.map((p) => (
-              <option key={p.value} value={p.value} className="text-ink">
-                {p.label}
-              </option>
-            ))}
-          </select>
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              className="rounded-[6px] border-0 bg-white/15 px-2.5 py-1.5 text-[12px] font-semibold text-white outline-none [color-scheme:dark]"
+              value={period}
+              onChange={(e) => setPeriod(e.target.value)}
+            >
+              {PERIODS.map((p) => (
+                <option key={p.value} value={p.value} className="text-ink">
+                  {p.label}
+                </option>
+              ))}
+            </select>
+            <ExportButton
+              dark
+              filename="orders-mis"
+              columns={[
+                { key: "workOrderNo", label: "Work Order #" },
+                { key: "date", label: "Date" },
+                { key: "type", label: "Type" },
+                { key: "status", label: "Status" },
+                { key: "poNumber", label: "PO Number" },
+                { key: "sku", label: "SKU" },
+                { key: "spec", label: "Spec" },
+                { key: "qty", label: "Qty" },
+                { key: "netPrice", label: "Net Price" },
+                { key: "lineTotalExGst", label: "Line Total (ex GST)" },
+                { key: "gstPercent", label: "GST %" },
+                { key: "lineTotalInclGst", label: "Line Total (incl GST)" },
+              ]}
+              rows={orderExportRows}
+            />
+          </div>
         </div>
 
         <div className="grid grid-cols-2 gap-2.5 bg-card p-3.5 sm:grid-cols-4">

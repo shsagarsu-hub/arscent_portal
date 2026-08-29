@@ -118,10 +118,6 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
       </table>
       <p style="margin-top: 12px; font-weight: bold;">Total (ex GST): ${total.toLocaleString("en-IN")}</p>
       <p style="margin: 2px 0 0; font-weight: bold;">Total (incl. GST @ ${DEFAULT_GST_PERCENT}%): ${(total * (1 + DEFAULT_GST_PERCENT / 100)).toLocaleString("en-IN", { maximumFractionDigits: 2 })}</p>
-      <p style="margin-top: 20px; color: #6b7c9e; font-size: 12px;">
-        Submitted by ${escapeHtml(input.hospitalName ?? "a hospital user")} on ${new Date(input.createdAt).toLocaleString("en-IN")}.
-        ${input.poAttachmentUrl ? " The hospital's PO copy is attached." : ""}
-      </p>
     </div>
   `;
 
@@ -183,9 +179,6 @@ export async function sendUsageInvoiceEmail(input: UsageInvoiceEmailInput): Prom
     <div style="font-family: Arial, sans-serif; color: #172544; max-width: 560px;">
       <p style="margin: 0 0 16px;">Dear Team,</p>
       <p style="margin: 0 0 16px;">PFA the invoice for usage dated ${entryDateLabel} (${escapeHtml(input.skuName)}, qty ${input.qty}).</p>
-      <p style="margin: 24px 0 0; color: #6b7c9e; font-size: 11px;">
-        ${escapeHtml(input.accountLabel)}${input.locationName ? ` — ${escapeHtml(input.locationName)}` : ""}
-      </p>
     </div>
   `;
 
@@ -198,6 +191,54 @@ export async function sendUsageInvoiceEmail(input: UsageInvoiceEmailInput): Prom
       attachments: [{ filename: "Invoice" + fileExt(input.invoiceUrl), path: input.invoiceUrl }],
     });
     return { sent: true, recipients: input.to };
+  } catch (err) {
+    return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: input.to };
+  }
+}
+
+export interface SalesInvoiceEmailInput {
+  workOrderNo: string;
+  accountLabel: string;
+  locationName: string | null;
+  to: string[];
+  cc: string[];
+  invoiceUrl: string;
+}
+
+/**
+ * Sends a closed Saleable order's invoice to the hospital -- fired from the
+ * "Send Invoice Email" step right after the invoice is uploaded, with the
+ * account manager's own To/Cc (unlike sendUsageInvoiceEmail, which always
+ * auto-resolves the hospital's login and doesn't ask).
+ */
+export async function sendSalesInvoiceEmail(input: SalesInvoiceEmailInput): Promise<SendResult> {
+  const transporter = getTransporter();
+
+  if (!transporter) {
+    console.warn(`[email] GMAIL_USER/GMAIL_APP_PASSWORD not set -- skipped sales invoice email for ${input.workOrderNo} (would have gone to: ${input.to.join(", ") || "nobody resolved"})`);
+    return { sent: false, reason: "Gmail sender not configured", recipients: input.to };
+  }
+  if (input.to.length === 0) {
+    return { sent: false, reason: "no recipients resolved", recipients: [] };
+  }
+
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #172544; max-width: 560px;">
+      <p style="margin: 0 0 16px;">Dear Team,</p>
+      <p style="margin: 0 0 16px;">PFA the invoice for order ${escapeHtml(input.workOrderNo)}.</p>
+    </div>
+  `;
+
+  try {
+    await transporter.sendMail({
+      from: `"${input.accountLabel} (via Arscent Orders)" <${GMAIL_USER}>`,
+      to: input.to,
+      cc: input.cc.length > 0 ? input.cc : undefined,
+      subject: `Sales Invoice — ${input.workOrderNo} — ${input.accountLabel}${input.locationName ? ` (${input.locationName})` : ""}`,
+      html,
+      attachments: [{ filename: "Invoice" + fileExt(input.invoiceUrl), path: input.invoiceUrl }],
+    });
+    return { sent: true, recipients: [...input.to, ...input.cc] };
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: input.to };
   }
@@ -253,10 +294,6 @@ export async function sendPurchaseOrderEmail(input: PurchaseOrderEmailInput): Pr
       <p style="margin: 8px 0 0;">No: 110, 2nd Cross, 4th Main,</p>
       <p style="margin: 8px 0 0;">HAL 3rd Stage, Bangalore - 560075</p>
       <p style="margin: 8px 0 0;">Ph:080-40950869 / 9035573666</p>
-      <p style="margin-top: 24px; color: #6b7c9e; font-size: 11px;">
-        PO ${escapeHtml(input.poNumber)} — placed via the Arscent Account Management Portal
-        ${input.placedByName ? `by ${escapeHtml(input.placedByName)} ` : ""}on ${new Date(input.createdAt).toLocaleString("en-IN")}.
-      </p>
     </div>
   `;
 

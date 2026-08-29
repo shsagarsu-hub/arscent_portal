@@ -5,6 +5,7 @@ import { createClient } from "@/lib/supabase/client";
 import { todayISO } from "@/lib/dates";
 import type { OrderDetail } from "./OrderDetailModal";
 import type { MovementCategory } from "@/lib/supabase/database.types";
+import { getDefaultInvoiceRecipients, sendSalesInvoiceEmailAction } from "@/app/manager/orders/actions";
 
 interface BatchOption {
   batch_number: string;
@@ -144,6 +145,15 @@ export function OrderFulfillmentModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Shown after a successful invoice upload (mode "invoice" only) -- lets
+  // the manager confirm/edit who the invoice email goes to before sending,
+  // instead of it going out silently.
+  const [closedOrderId, setClosedOrderId] = useState<string | null>(null);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailCc, setEmailCc] = useState("");
+  const [sendingEmail, setSendingEmail] = useState(false);
+  const [emailStatus, setEmailStatus] = useState<{ ok: boolean; text: string } | null>(null);
+
   const allReady = order.order_lines.every((l) => lines[l.id]?.itemMasterId && lines[l.id]?.selectedBatches.length === l.qty);
 
   function updateLine(lineId: string, patch: Partial<LineState>) {
@@ -279,7 +289,34 @@ export function OrderFulfillmentModal({
       return;
     }
     onDone();
-    onClose();
+    if (mode === "dc") {
+      onClose();
+      return;
+    }
+    // Invoice mode: don't close yet -- offer to email it, prefilled with
+    // the hospital's own login(s) but editable before anything is sent.
+    setClosedOrderId(order.id);
+    const defaults = await getDefaultInvoiceRecipients(order.account_id, order.location_id);
+    setEmailTo(defaults.success ? defaults.to.join(", ") : "");
+  }
+
+  async function sendInvoiceEmail() {
+    if (!closedOrderId) return;
+    const to = emailTo.split(",").map((s) => s.trim()).filter(Boolean);
+    const cc = emailCc.split(",").map((s) => s.trim()).filter(Boolean);
+    if (to.length === 0) {
+      setEmailStatus({ ok: false, text: "Add at least one To recipient." });
+      return;
+    }
+    setSendingEmail(true);
+    setEmailStatus(null);
+    const res = await sendSalesInvoiceEmailAction(closedOrderId, to, cc);
+    setSendingEmail(false);
+    if (!res.success) {
+      setEmailStatus({ ok: false, text: res.message });
+      return;
+    }
+    setEmailStatus({ ok: true, text: `Sent to ${res.recipients.join(", ")}.` });
   }
 
   return (
@@ -288,6 +325,39 @@ export function OrderFulfillmentModal({
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-[8px] bg-card p-5 shadow-[0_12px_32px_rgba(23,37,68,0.25)]"
         onClick={(e) => e.stopPropagation()}
       >
+        {closedOrderId ? (
+          <>
+            <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Send Invoice Email</h3>
+            <p className="mb-4 text-xs text-muted">
+              {order.accounts?.label ?? "—"}
+              {order.account_locations?.name ? ` (${order.account_locations.name})` : ""} — invoice uploaded, order closed.
+            </p>
+            <div className="mb-3">
+              <label className="field-label">To</label>
+              <input className="field-input" value={emailTo} onChange={(e) => setEmailTo(e.target.value)} placeholder="name@example.com, name2@example.com" autoFocus />
+            </div>
+            <div className="mb-4">
+              <label className="field-label">Cc</label>
+              <input className="field-input" value={emailCc} onChange={(e) => setEmailCc(e.target.value)} placeholder="Optional — comma-separated emails" />
+            </div>
+            {emailStatus && (
+              <p className={`mb-3.5 text-[12.5px] font-semibold ${emailStatus.ok ? "text-good-fg" : "text-bad-fg"}`}>{emailStatus.text}</p>
+            )}
+            <div className="flex gap-2">
+              <button type="button" className="btn-primary" disabled={sendingEmail} onClick={sendInvoiceEmail}>
+                {sendingEmail ? "Sending…" : "Send Invoice Email"}
+              </button>
+              <button
+                type="button"
+                className="rounded-[4px] border border-border bg-card px-3.5 py-1.5 text-xs font-bold text-ink-soft"
+                onClick={onClose}
+              >
+                {emailStatus?.ok ? "Close" : "Skip"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
         <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">
           {mode === "dc" ? "Enter DC details" : "Enter invoice details"}
         </h3>
@@ -404,6 +474,8 @@ export function OrderFulfillmentModal({
             Cancel
           </button>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
 import { createAdminClient } from "@/lib/supabase/admin";
-import { sendOrderNotification } from "@/lib/email";
+import { sendOrderNotification, sendSalesInvoiceEmail } from "@/lib/email";
 import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { ORDER_TYPE_LABELS } from "@/lib/orders/orderTypeLabels";
 import type { BillingStatus, OrderType } from "@/lib/supabase/database.types";
@@ -527,4 +527,84 @@ export async function getConsignmentBalance(accountId: string, locationId: strin
   }
 
   return { success: true as const, lines: Array.from(bySku.values()) };
+}
+
+/**
+ * Every real hospital login for an account/location -- an account-wide
+ * login (location_id null on the profile) counts for any location under
+ * that account. Shared by the sales-invoice and usage-invoice email
+ * actions so there's one place resolving "who at the hospital should get
+ * this," not two copies that could drift.
+ */
+async function resolveHospitalEmails(admin: ReturnType<typeof createAdminClient>, accountId: string, locationId: string | null) {
+  const [{ data: hospitalProfiles }, { data: userList }] = await Promise.all([
+    admin.from("profiles").select("id, location_id").eq("role", "hospital").eq("account_id", accountId),
+    admin.auth.admin.listUsers(),
+  ]);
+  const emailById = new Map(userList?.users.map((u) => [u.id, u.email]) ?? []);
+  return [
+    ...new Set(
+      (hospitalProfiles ?? [])
+        .filter((p) => p.location_id === null || p.location_id === locationId)
+        .map((p) => emailById.get(p.id))
+        .filter((e): e is string => !!e)
+    ),
+  ];
+}
+
+/** Prefills the To field when opening the "Send Invoice Email" step -- the
+ * account manager can still edit or add Cc before actually sending. */
+export async function getDefaultInvoiceRecipients(accountId: string, locationId: string | null) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { success: false as const, message: "Not signed in." };
+
+  const admin = createAdminClient();
+  const to = await resolveHospitalEmails(admin, accountId, locationId);
+  return { success: true as const, to };
+}
+
+/**
+ * Emails a closed Saleable order's invoice to the hospital, with the
+ * account manager's own To/Cc (prefilled from getDefaultInvoiceRecipients
+ * above, editable before sending) -- fired from the "Send Invoice Email"
+ * step right after the invoice is uploaded and the order closes.
+ */
+export async function sendSalesInvoiceEmailAction(orderId: string, to: string[], cc: string[]) {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) return { success: false as const, message: "Not signed in." };
+
+  const { data: profile } = await supabase.from("profiles").select("role").eq("id", user.id).maybeSingle();
+  if (!profile || (profile.role !== "account_manager" && profile.role !== "admin")) {
+    return { success: false as const, message: "Not authorized." };
+  }
+  if (to.length === 0) return { success: false as const, message: "Add at least one To recipient." };
+
+  const admin = createAdminClient();
+  const { data: order, error: orderErr } = await admin
+    .from("orders")
+    .select("id, created_at, account_id, location_id, sales_invoice_url, accounts(label), account_locations(name)")
+    .eq("id", orderId)
+    .maybeSingle();
+  if (orderErr || !order) return { success: false as const, message: orderErr?.message ?? "Order not found." };
+  if (!order.sales_invoice_url) return { success: false as const, message: "Upload the sales invoice first." };
+
+  const result = await sendSalesInvoiceEmail({
+    workOrderNo: workOrderNo(order.id, order.created_at),
+    accountLabel: order.accounts?.label ?? "—",
+    locationName: order.account_locations?.name ?? null,
+    to,
+    cc,
+    invoiceUrl: order.sales_invoice_url,
+  });
+
+  if (!result.sent) {
+    return { success: false as const, message: "reason" in result ? (result.reason ?? "Couldn't send.") : (result.error ?? "Couldn't send.") };
+  }
+  return { success: true as const, recipients: result.recipients ?? [] };
 }

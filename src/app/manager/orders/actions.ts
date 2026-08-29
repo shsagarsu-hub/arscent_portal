@@ -342,15 +342,28 @@ async function resolvePendingConsumption(
       .eq("id", params.usageLogId)
       .maybeSingle();
     if (!usage) return null;
-    const { data: billing } = await admin
-      .from("billing_requests")
-      .select("id, status")
-      .or(
-        usage.consumption_order_line_id
-          ? `usage_log_id.eq.${usage.id},order_line_id.eq.${usage.consumption_order_line_id}`
-          : `usage_log_id.eq.${usage.id}`
-      )
-      .maybeSingle();
+
+    // Two separate exact-match lookups instead of one combined .or() string --
+    // a single .or() silently swallowed its own error here once (more than
+    // one match, or a malformed filter) and the caller had no error check,
+    // so an already-billed row's real status got lost and defaulted below to
+    // "pending" -- which then let a real, already-invoiced consumption
+    // record get deleted outright. Any error now propagates and blocks the
+    // delete instead of being treated as "nothing found."
+    const [byUsageLog, byOrderLine] = await Promise.all([
+      admin.from("billing_requests").select("id, status").eq("usage_log_id", usage.id),
+      usage.consumption_order_line_id
+        ? admin.from("billing_requests").select("id, status").eq("order_line_id", usage.consumption_order_line_id)
+        : Promise.resolve({ data: [], error: null }),
+    ]);
+    if (byUsageLog.error) throw new Error(`Couldn't verify this entry's billing status: ${byUsageLog.error.message}`);
+    if (byOrderLine.error) throw new Error(`Couldn't verify this entry's billing status: ${byOrderLine.error.message}`);
+    const matches = [...(byUsageLog.data ?? []), ...(byOrderLine.data ?? [])];
+    // Prefer whichever match is furthest along (billed > requested > pending)
+    // rather than an arbitrary one, in case duplicate rows exist.
+    const rank: Record<BillingStatus, number> = { pending: 0, requested: 1, billed: 2 };
+    const billing = matches.length > 0 ? matches.reduce((a, b) => (rank[b.status] > rank[a.status] ? b : a)) : null;
+
     return {
       usageLogId: usage.id,
       billingRequestId: billing?.id ?? null,
@@ -404,7 +417,12 @@ async function deletePendingConsumption(params: { usageLogId?: string; billingRe
   if (!profile) return { success: false as const, message: "Not authorized." };
 
   const admin = createAdminClient();
-  const entry = await resolvePendingConsumption(admin, params);
+  let entry: PendingConsumption | null;
+  try {
+    entry = await resolvePendingConsumption(admin, params);
+  } catch (err) {
+    return { success: false as const, message: err instanceof Error ? err.message : "Couldn't verify this entry's status." };
+  }
   if (!entry) return { success: false as const, message: "Entry not found." };
 
   const isManager = profile.role === "account_manager" || profile.role === "admin";

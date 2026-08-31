@@ -1,11 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import { Empty, Loading } from "./AppShell";
 import { fmtDate, todayISO } from "@/lib/dates";
 import { deletePendingBillingRequest } from "@/app/manager/orders/actions";
-import { sendUsageInvoiceEmailAction } from "@/app/manager/consignment/actions";
+import { getDefaultUsageInvoiceRecipients, sendUsageInvoiceEmailAction } from "@/app/manager/consignment/actions";
 import type { BillingStatus } from "@/lib/supabase/database.types";
 
 interface BillingRow {
@@ -30,6 +30,50 @@ interface BillingRow {
   account_locations: { name: string } | null;
   item_master: { name: string } | null;
   order_lines: { notes: string | null; order_id: string } | null;
+}
+
+/** One hospital + center + day's worth of billing_requests rows, collapsed
+ * to a single summary line -- usage is logged and invoiced per visit, not
+ * per individual lens, so that's the granularity both tables show by
+ * default. The underlying rows (and their per-item actions) are still there
+ * on expand, since Record still has to deduct stock batch by batch. */
+interface BillingGroup {
+  key: string;
+  account_id: string;
+  location_id: string;
+  entry_date: string;
+  accounts: { label: string } | null;
+  account_locations: { name: string } | null;
+  rows: BillingRow[];
+  totalQty: number;
+  totalAmount: number | null;
+}
+
+function groupRows(rows: BillingRow[]): BillingGroup[] {
+  const map = new Map<string, BillingGroup>();
+  for (const row of rows) {
+    const key = `${row.account_id}|${row.location_id}|${row.entry_date}`;
+    let group = map.get(key);
+    if (!group) {
+      group = {
+        key,
+        account_id: row.account_id,
+        location_id: row.location_id,
+        entry_date: row.entry_date,
+        accounts: row.accounts,
+        account_locations: row.account_locations,
+        rows: [],
+        totalQty: 0,
+        totalAmount: null,
+      };
+      map.set(key, group);
+    }
+    group.rows.push(row);
+    group.totalQty += row.qty;
+    if (row.amount != null) group.totalAmount = (group.totalAmount ?? 0) + row.amount;
+  }
+  // entry_date desc, same ordering the flat list used before grouping.
+  return Array.from(map.values()).sort((a, b) => (a.entry_date < b.entry_date ? 1 : a.entry_date > b.entry_date ? -1 : 0));
 }
 
 /** Lets a manager confirm the exact catalog item an order-sourced pending
@@ -119,12 +163,17 @@ function ItemPicker({
  * consumption actually happened and recording the eventual invoice -- is a
  * manager action across every account at once, not something a hospital
  * self-certifies.
+ *
+ * Both tables below are grouped one line per hospital + center + day: a
+ * center logs usage and gets invoiced per visit, not per individual lens.
+ * The per-item rows (and their Edit/Record/Delete actions, which still have
+ * to work batch by batch) are one click away on expand.
  */
 export function ConsignmentBillingPanel() {
   const supabase = createClient();
 
   const [billing, setBilling] = useState<BillingRow[] | null>(null);
-  const [invoicingRow, setInvoicingRow] = useState<BillingRow | null>(null);
+  const [invoicingGroup, setInvoicingGroup] = useState<BillingGroup | null>(null);
   const [invoiceDate, setInvoiceDate] = useState(todayISO());
   const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
   const [savingInvoice, setSavingInvoice] = useState(false);
@@ -132,7 +181,10 @@ export function ConsignmentBillingPanel() {
   const [savedInvoiceUrl, setSavedInvoiceUrl] = useState<string | null>(null);
   const [sendingEmail, setSendingEmail] = useState(false);
   const [emailStatus, setEmailStatus] = useState<{ ok: boolean; text: string } | null>(null);
+  const [emailTo, setEmailTo] = useState("");
+  const [emailCc, setEmailCc] = useState("");
   const [recordingId, setRecordingId] = useState<string | null>(null);
+  const [recordingGroupKey, setRecordingGroupKey] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editBatchNumber, setEditBatchNumber] = useState("");
   const [editItemMasterId, setEditItemMasterId] = useState("");
@@ -141,6 +193,8 @@ export function ConsignmentBillingPanel() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkRecording, setBulkRecording] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [expandedPending, setExpandedPending] = useState<Set<string>>(new Set());
+  const [expandedRequested, setExpandedRequested] = useState<Set<string>>(new Set());
 
   const loadBilling = useCallback(async () => {
     const { data } = await supabase
@@ -162,7 +216,7 @@ export function ConsignmentBillingPanel() {
   }, [loadBilling]);
 
   /** The actual DB work for one row -- shared by the single Record button
-   * and the bulk action below. Returns an error message, or null on success. */
+   * and the bulk actions below. Returns an error message, or null on success. */
   async function recordOne(row: BillingRow): Promise<string | null> {
     // Deduct from that hospital's consignment stock for the exact item +
     // batch this entry resolved to, so Inventory -> Consignment by hospital
@@ -240,11 +294,46 @@ export function ConsignmentBillingPanel() {
     loadBilling();
   }
 
+  /** Record every ready row in one hospital+center+day group at once -- the
+   * group-level counterpart to the single Record button, for the common
+   * case of clearing a whole visit in one go. */
+  async function recordGroup(group: BillingGroup) {
+    const rows = group.rows.filter(isReadyToRecord);
+    if (rows.length === 0) return;
+    if (
+      !confirm(
+        `Record ${rows.length} of ${group.rows.length} item(s) for ${group.accounts?.label ?? "this account"}${
+          group.account_locations?.name ? ` (${group.account_locations.name})` : ""
+        } on ${fmtDate(group.entry_date)} as consumed?`
+      )
+    ) {
+      return;
+    }
+    setRecordingGroupKey(group.key);
+    const errors: string[] = [];
+    for (const row of rows) {
+      const err = await recordOne(row);
+      if (err) errors.push(`${row.skus?.name ?? row.id}: ${err}`);
+    }
+    setRecordingGroupKey(null);
+    if (errors.length > 0) alert(`${rows.length - errors.length} of ${rows.length} recorded. Failures:\n` + errors.join("\n"));
+    loadBilling();
+  }
+
   function toggleSelected(id: string) {
     setSelectedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleExpanded(set: React.Dispatch<React.SetStateAction<Set<string>>>, key: string) {
+    set((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
       return next;
     });
   }
@@ -307,8 +396,11 @@ export function ConsignmentBillingPanel() {
     }
   }
 
+  /** One invoice covers every item in the group -- a hospital gets billed
+   * once per visit, not once per lens. Every billing_requests row in the
+   * group gets the same invoice file, date, and billed status in one update. */
   async function submitInvoice() {
-    if (!invoicingRow) return;
+    if (!invoicingGroup) return;
     if (!invoiceFile || !invoiceDate) {
       alert("Upload the invoice and enter its date.");
       return;
@@ -328,6 +420,7 @@ export function ConsignmentBillingPanel() {
     }
     const invoiceUrl: string = uploadBody.url;
 
+    const ids = invoicingGroup.rows.map((r) => r.id);
     const { error } = await supabase
       .from("billing_requests")
       .update({
@@ -336,25 +429,37 @@ export function ConsignmentBillingPanel() {
         invoice_date: invoiceDate,
         invoice_attachment_url: invoiceUrl,
       })
-      .eq("id", invoicingRow.id);
+      .in("id", ids);
     if (error) {
       setSavingInvoice(false);
       alert("Couldn't save the invoice: " + error.message);
       return;
     }
-    if (invoicingRow.order_lines?.order_id) {
-      await maybeCloseOrder(invoicingRow.order_lines.order_id);
+    const orderIds = new Set(invoicingGroup.rows.map((r) => r.order_lines?.order_id).filter((id): id is string => !!id));
+    for (const orderId of orderIds) {
+      await maybeCloseOrder(orderId);
     }
     setSavingInvoice(false);
     setSavedInvoiceUrl(invoiceUrl);
+    // Prefill To with the hospital's own login(s) -- still editable before
+    // anything is actually sent.
+    const defaults = await getDefaultUsageInvoiceRecipients(invoicingGroup.account_id, invoicingGroup.location_id);
+    setEmailTo(defaults.success ? defaults.to.join(", ") : "");
+    setEmailCc("");
     loadBilling();
   }
 
   async function sendInvoiceEmail() {
-    if (!invoicingRow) return;
+    if (!invoicingGroup) return;
+    const to = emailTo.split(",").map((s) => s.trim()).filter(Boolean);
+    const cc = emailCc.split(",").map((s) => s.trim()).filter(Boolean);
+    if (to.length === 0) {
+      setEmailStatus({ ok: false, text: "Add at least one To recipient." });
+      return;
+    }
     setSendingEmail(true);
     setEmailStatus(null);
-    const res = await sendUsageInvoiceEmailAction(invoicingRow.id);
+    const res = await sendUsageInvoiceEmailAction(invoicingGroup.rows.map((r) => r.id), to, cc);
     setSendingEmail(false);
     if (!res.success) {
       setEmailStatus({ ok: false, text: res.message });
@@ -364,15 +469,20 @@ export function ConsignmentBillingPanel() {
   }
 
   function closeInvoiceModal() {
-    setInvoicingRow(null);
+    setInvoicingGroup(null);
     setInvoiceFile(null);
     setSavedInvoiceUrl(null);
     setEmailStatus(null);
+    setEmailTo("");
+    setEmailCc("");
   }
 
   const pending = billing?.filter((b) => b.status === "pending") ?? [];
   const requested = billing?.filter((b) => b.status === "requested") ?? [];
   const selectedReadyCount = pending.filter((b) => selectedIds.has(b.id) && isReadyToRecord(b)).length;
+
+  const pendingGroups = useMemo(() => groupRows(pending), [pending]);
+  const requestedGroups = useMemo(() => groupRows(requested), [requested]);
 
   return (
     <div className="space-y-4">
@@ -392,7 +502,7 @@ export function ConsignmentBillingPanel() {
         </div>
         {billing === null ? (
           <Loading />
-        ) : pending.length === 0 ? (
+        ) : pendingGroups.length === 0 ? (
           <Empty title="Nothing to record" body="New usage hospitals log or orders sent to Consignment will show up here first." />
         ) : (
           <div className="overflow-x-auto">
@@ -403,128 +513,173 @@ export function ConsignmentBillingPanel() {
                   <th>Date</th>
                   <th>Account</th>
                   <th>Center</th>
-                  <th>SKU (family)</th>
-                  <th>Batch</th>
-                  <th>Note</th>
+                  <th>Items</th>
                   <th>Qty</th>
                   <th>Amount</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {pending.map((b) =>
-                  editingId === b.id ? (
-                    <tr key={b.id}>
-                      <td></td>
-                      <td className="whitespace-nowrap">{fmtDate(b.entry_date)}</td>
-                      <td className="whitespace-nowrap">{b.accounts?.label ?? "—"}</td>
-                      <td className="whitespace-nowrap">{b.account_locations?.name ?? "—"}</td>
-                      <td className="whitespace-nowrap">{b.skus?.name ?? "—"}</td>
-                      <td>
-                        <div className="flex flex-col gap-1">
-                          {!b.usage_log_id && (
-                            <ItemPicker
-                              itemId={editItemMasterId}
-                              itemName={editItemName}
-                              onSelect={(id, name) => {
-                                setEditItemMasterId(id);
-                                setEditItemName(name);
+                {pendingGroups.map((g) => {
+                  const isOpen = expandedPending.has(g.key);
+                  const readyCount = g.rows.filter(isReadyToRecord).length;
+                  return (
+                    <Fragment key={g.key}>
+                      <tr className="cursor-pointer hover:bg-cream" onClick={() => toggleExpanded(setExpandedPending, g.key)}>
+                        <td className="text-muted">{isOpen ? "▾" : "▸"}</td>
+                        <td className="whitespace-nowrap">{fmtDate(g.entry_date)}</td>
+                        <td className="whitespace-nowrap">{g.accounts?.label ?? "—"}</td>
+                        <td className="whitespace-nowrap">{g.account_locations?.name ?? "—"}</td>
+                        <td>{g.rows.length}</td>
+                        <td>{g.totalQty}</td>
+                        <td>{g.totalAmount != null ? g.totalAmount.toLocaleString("en-IN") : "—"}</td>
+                        <td className="whitespace-nowrap">
+                          {readyCount > 0 && (
+                            <button
+                              type="button"
+                              className="btn-primary !px-2.5 !py-1 text-[11px]"
+                              disabled={recordingGroupKey === g.key}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                recordGroup(g);
                               }}
-                            />
+                            >
+                              {recordingGroupKey === g.key ? "Recording…" : `Record all ready (${readyCount})`}
+                            </button>
                           )}
-                          <input
-                            className="field-input w-[150px] !py-1 text-[12px]"
-                            placeholder="Batch number"
-                            value={editBatchNumber}
-                            onChange={(e) => setEditBatchNumber(e.target.value)}
-                            autoFocus={!!b.usage_log_id}
-                          />
-                        </div>
-                      </td>
-                      <td className="max-w-[220px] text-[11.5px] text-muted">
-                        {b.usage_log?.note ?? b.order_lines?.notes ?? "—"}
-                      </td>
-                      <td>{b.qty}</td>
-                      <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
-                      <td className="whitespace-nowrap">
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            className="btn-primary !px-2.5 !py-1 text-[11px]"
-                            disabled={savingEdit}
-                            onClick={() => saveEdit(b)}
-                          >
-                            {savingEdit ? "Saving…" : "Save"}
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
-                            disabled={savingEdit}
-                            onClick={() => setEditingId(null)}
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ) : (
-                    <tr key={b.id}>
-                      <td>
-                        <input
-                          type="checkbox"
-                          checked={selectedIds.has(b.id)}
-                          onChange={() => toggleSelected(b.id)}
-                          disabled={!isReadyToRecord(b)}
-                        />
-                      </td>
-                      <td className="whitespace-nowrap">{fmtDate(b.entry_date)}</td>
-                      <td className="whitespace-nowrap">{b.accounts?.label ?? "—"}</td>
-                      <td className="whitespace-nowrap">{b.account_locations?.name ?? "—"}</td>
-                      <td className="whitespace-nowrap">{b.skus?.name ?? "—"}</td>
-                      <td className="whitespace-nowrap">
-                        {b.batch_number ?? (
-                          <span className="badge badge-bad" title="Confirm the catalog item + batch via Edit before this can be recorded">
-                            {b.order_line_id ? "from order — needs item + batch" : "needs batch"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="max-w-[220px] text-[11.5px] text-muted">
-                        {b.usage_log?.note ?? b.order_lines?.notes ?? "—"}
-                      </td>
-                      <td>{b.qty}</td>
-                      <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
-                      <td className="whitespace-nowrap">
-                        <div className="flex gap-1.5">
-                          <button
-                            type="button"
-                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
-                            disabled={recordingId === b.id}
-                            onClick={() => startEdit(b)}
-                          >
-                            Edit
-                          </button>
-                          <button
-                            type="button"
-                            className="btn-primary !px-2.5 !py-1 text-[11px]"
-                            disabled={recordingId === b.id || !isReadyToRecord(b)}
-                            title={isReadyToRecord(b) ? undefined : "Confirm the catalog item + batch via Edit first"}
-                            onClick={() => recordUsage(b)}
-                          >
-                            {recordingId === b.id ? "Recording…" : "Record"}
-                          </button>
-                          <button
-                            type="button"
-                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-bad-fg"
-                            disabled={deletingId === b.id}
-                            onClick={() => deleteRow(b)}
-                          >
-                            {deletingId === b.id ? "Deleting…" : "Delete"}
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  )
-                )}
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={8} className="bg-cream/40 p-0">
+                            <table className="u-table w-full">
+                              <thead>
+                                <tr>
+                                  <th></th>
+                                  <th>SKU</th>
+                                  <th>Batch</th>
+                                  <th>Note</th>
+                                  <th>Qty</th>
+                                  <th>Amount</th>
+                                  <th></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {g.rows.map((b) =>
+                                  editingId === b.id ? (
+                                    <tr key={b.id}>
+                                      <td></td>
+                                      <td className="whitespace-nowrap text-[11.5px] text-muted">{b.skus?.name ?? "—"}</td>
+                                      <td>
+                                        <div className="flex flex-col gap-1">
+                                          {!b.usage_log_id && (
+                                            <ItemPicker
+                                              itemId={editItemMasterId}
+                                              itemName={editItemName}
+                                              onSelect={(id, name) => {
+                                                setEditItemMasterId(id);
+                                                setEditItemName(name);
+                                              }}
+                                            />
+                                          )}
+                                          <input
+                                            className="field-input w-[150px] !py-1 text-[12px]"
+                                            placeholder="Batch number"
+                                            value={editBatchNumber}
+                                            onChange={(e) => setEditBatchNumber(e.target.value)}
+                                            autoFocus={!!b.usage_log_id}
+                                          />
+                                        </div>
+                                      </td>
+                                      <td className="max-w-[220px] text-[11.5px] text-muted">
+                                        {b.usage_log?.note ?? b.order_lines?.notes ?? "—"}
+                                      </td>
+                                      <td>{b.qty}</td>
+                                      <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
+                                      <td className="whitespace-nowrap">
+                                        <div className="flex gap-1.5">
+                                          <button
+                                            type="button"
+                                            className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                            disabled={savingEdit}
+                                            onClick={() => saveEdit(b)}
+                                          >
+                                            {savingEdit ? "Saving…" : "Save"}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
+                                            disabled={savingEdit}
+                                            onClick={() => setEditingId(null)}
+                                          >
+                                            Cancel
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  ) : (
+                                    <tr key={b.id}>
+                                      <td>
+                                        <input
+                                          type="checkbox"
+                                          checked={selectedIds.has(b.id)}
+                                          onChange={() => toggleSelected(b.id)}
+                                          disabled={!isReadyToRecord(b)}
+                                        />
+                                      </td>
+                                      <td className="whitespace-nowrap text-[11.5px] text-muted">{b.skus?.name ?? "—"}</td>
+                                      <td className="whitespace-nowrap">
+                                        {b.batch_number ?? (
+                                          <span className="badge badge-bad" title="Confirm the catalog item + batch via Edit before this can be recorded">
+                                            {b.order_line_id ? "from order — needs item + batch" : "needs batch"}
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="max-w-[220px] text-[11.5px] text-muted">
+                                        {b.usage_log?.note ?? b.order_lines?.notes ?? "—"}
+                                      </td>
+                                      <td>{b.qty}</td>
+                                      <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
+                                      <td className="whitespace-nowrap">
+                                        <div className="flex gap-1.5">
+                                          <button
+                                            type="button"
+                                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-ink-soft"
+                                            disabled={recordingId === b.id}
+                                            onClick={() => startEdit(b)}
+                                          >
+                                            Edit
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="btn-primary !px-2.5 !py-1 text-[11px]"
+                                            disabled={recordingId === b.id || !isReadyToRecord(b)}
+                                            title={isReadyToRecord(b) ? undefined : "Confirm the catalog item + batch via Edit first"}
+                                            onClick={() => recordUsage(b)}
+                                          >
+                                            {recordingId === b.id ? "Recording…" : "Record"}
+                                          </button>
+                                          <button
+                                            type="button"
+                                            className="rounded-[4px] border border-border bg-card px-2.5 py-1 text-[11px] font-bold text-bad-fg"
+                                            disabled={deletingId === b.id}
+                                            onClick={() => deleteRow(b)}
+                                          >
+                                            {deletingId === b.id ? "Deleting…" : "Delete"}
+                                          </button>
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )
+                                )}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -535,66 +690,101 @@ export function ConsignmentBillingPanel() {
         <h3 className="mb-3.5 text-[14.5px] font-extrabold text-ink">Pending Invoice</h3>
         {billing === null ? (
           <Loading />
-        ) : requested.length === 0 ? (
+        ) : requestedGroups.length === 0 ? (
           <Empty title="Nothing pending" body="Recorded usage awaiting an invoice will show up here." />
         ) : (
           <div className="overflow-x-auto">
             <table className="u-table">
               <thead>
                 <tr>
+                  <th></th>
                   <th>Date</th>
                   <th>Account</th>
                   <th>Center</th>
-                  <th>SKU (family)</th>
-                  <th>Batch</th>
-                  <th>Note</th>
+                  <th>Items</th>
                   <th>Qty</th>
                   <th>Amount</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {requested.map((b) => (
-                  <tr
-                    key={b.id}
-                    className="cursor-pointer hover:bg-cream"
-                    onClick={() => {
-                      setInvoicingRow(b);
-                      setInvoiceFile(null);
-                      setSavedInvoiceUrl(null);
-                      setEmailStatus(null);
-                      setInvoiceDate(todayISO());
-                    }}
-                  >
-                    <td className="whitespace-nowrap">{fmtDate(b.entry_date)}</td>
-                    <td className="whitespace-nowrap">{b.accounts?.label ?? "—"}</td>
-                    <td className="whitespace-nowrap">{b.account_locations?.name ?? "—"}</td>
-                    <td className="whitespace-nowrap">{b.skus?.name ?? "—"}</td>
-                    <td className="whitespace-nowrap">{b.batch_number ?? "—"}</td>
-                    <td className="max-w-[220px] text-[11.5px] text-muted">
-                      {b.usage_log?.note ?? b.order_lines?.notes ?? "—"}
-                    </td>
-                    <td>{b.qty}</td>
-                    <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
-                    <td>
-                      <span className="text-xs font-bold text-brand">Add Invoice →</span>
-                    </td>
-                  </tr>
-                ))}
+                {requestedGroups.map((g) => {
+                  const isOpen = expandedRequested.has(g.key);
+                  return (
+                    <Fragment key={g.key}>
+                      <tr className="hover:bg-cream">
+                        <td
+                          className="cursor-pointer text-muted"
+                          onClick={() => toggleExpanded(setExpandedRequested, g.key)}
+                        >
+                          {isOpen ? "▾" : "▸"}
+                        </td>
+                        <td className="whitespace-nowrap">{fmtDate(g.entry_date)}</td>
+                        <td className="whitespace-nowrap">{g.accounts?.label ?? "—"}</td>
+                        <td className="whitespace-nowrap">{g.account_locations?.name ?? "—"}</td>
+                        <td>{g.rows.length}</td>
+                        <td>{g.totalQty}</td>
+                        <td>{g.totalAmount != null ? g.totalAmount.toLocaleString("en-IN") : "—"}</td>
+                        <td>
+                          <button
+                            type="button"
+                            className="text-xs font-bold text-brand hover:underline"
+                            onClick={() => {
+                              setInvoicingGroup(g);
+                              setInvoiceFile(null);
+                              setSavedInvoiceUrl(null);
+                              setEmailStatus(null);
+                              setInvoiceDate(todayISO());
+                            }}
+                          >
+                            Add Invoice →
+                          </button>
+                        </td>
+                      </tr>
+                      {isOpen && (
+                        <tr>
+                          <td colSpan={8} className="bg-cream/40 p-0">
+                            <table className="u-table w-full">
+                              <thead>
+                                <tr>
+                                  <th>SKU</th>
+                                  <th>Batch</th>
+                                  <th>Qty</th>
+                                  <th>Amount</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {g.rows.map((b) => (
+                                  <tr key={b.id}>
+                                    <td className="whitespace-nowrap text-[11.5px] text-muted">{b.skus?.name ?? "—"}</td>
+                                    <td className="whitespace-nowrap text-[11.5px] text-muted">{b.batch_number ?? "—"}</td>
+                                    <td>{b.qty}</td>
+                                    <td>{b.amount != null ? b.amount.toLocaleString("en-IN") : "—"}</td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
               </tbody>
             </table>
           </div>
         )}
       </div>
 
-      {invoicingRow && (
+      {invoicingGroup && (
         <div className="fixed inset-0 z-100 flex items-center justify-center bg-black/40 p-4" onClick={closeInvoiceModal}>
           <div className="w-full max-w-sm rounded-[8px] bg-card p-5 shadow-[0_12px_32px_rgba(23,37,68,0.25)]" onClick={(e) => e.stopPropagation()}>
             <h3 className="mb-1 text-[14.5px] font-extrabold text-ink">Upload invoice</h3>
             <p className="mb-3.5 text-xs text-muted">
-              {invoicingRow.accounts?.label ?? "—"}
-              {invoicingRow.account_locations?.name ? ` (${invoicingRow.account_locations.name})` : ""} —{" "}
-              {invoicingRow.skus?.name ?? "—"} · Qty {invoicingRow.qty} · {fmtDate(invoicingRow.entry_date)}
+              {invoicingGroup.accounts?.label ?? "—"}
+              {invoicingGroup.account_locations?.name ? ` (${invoicingGroup.account_locations.name})` : ""} —{" "}
+              {invoicingGroup.rows.length} item{invoicingGroup.rows.length === 1 ? "" : "s"}, qty {invoicingGroup.totalQty} ·{" "}
+              {fmtDate(invoicingGroup.entry_date)}
             </p>
             {!savedInvoiceUrl ? (
               <>
@@ -632,6 +822,25 @@ export function ConsignmentBillingPanel() {
                     View
                   </a>
                 </p>
+                <div className="mb-3">
+                  <label className="field-label">To</label>
+                  <input
+                    className="field-input"
+                    value={emailTo}
+                    onChange={(e) => setEmailTo(e.target.value)}
+                    placeholder="name@example.com, name2@example.com"
+                    autoFocus
+                  />
+                </div>
+                <div className="mb-4">
+                  <label className="field-label">Cc</label>
+                  <input
+                    className="field-input"
+                    value={emailCc}
+                    onChange={(e) => setEmailCc(e.target.value)}
+                    placeholder="Optional — comma-separated emails"
+                  />
+                </div>
                 {emailStatus && (
                   <p className={`mb-3.5 text-[11.5px] font-semibold ${emailStatus.ok ? "text-good-fg" : "text-bad-fg"}`}>{emailStatus.text}</p>
                 )}

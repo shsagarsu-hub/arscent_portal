@@ -147,13 +147,18 @@ export async function sendOrderNotification(input: OrderEmailInput): Promise<Sen
   }
 }
 
+export interface UsageInvoiceEmailItem {
+  skuName: string;
+  qty: number;
+}
+
 export interface UsageInvoiceEmailInput {
   accountLabel: string;
   locationName: string | null;
-  skuName: string;
-  qty: number;
+  items: UsageInvoiceEmailItem[];
   entryDate: string;
   to: string[];
+  cc: string[];
   invoiceUrl: string;
 }
 
@@ -175,10 +180,15 @@ export async function sendUsageInvoiceEmail(input: UsageInvoiceEmailInput): Prom
   }
 
   const entryDateLabel = new Date(input.entryDate).toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+  const totalQty = input.items.reduce((sum, i) => sum + i.qty, 0);
+  const itemRows = input.items
+    .map((i) => `<li style="margin: 0 0 4px;">${escapeHtml(i.skuName)} — qty ${i.qty}</li>`)
+    .join("");
   const html = `
     <div style="font-family: Arial, sans-serif; color: #172544; max-width: 560px;">
       <p style="margin: 0 0 16px;">Dear Team,</p>
-      <p style="margin: 0 0 16px;">PFA the invoice for usage dated ${entryDateLabel} (${escapeHtml(input.skuName)}, qty ${input.qty}).</p>
+      <p style="margin: 0 0 10px;">PFA the invoice for usage dated ${entryDateLabel} (${totalQty} unit${totalQty === 1 ? "" : "s"} total):</p>
+      <ul style="margin: 0 0 16px; padding-left: 20px;">${itemRows}</ul>
     </div>
   `;
 
@@ -186,11 +196,12 @@ export async function sendUsageInvoiceEmail(input: UsageInvoiceEmailInput): Prom
     await transporter.sendMail({
       from: `"Arscent Orders" <${GMAIL_USER}>`,
       to: input.to,
+      cc: input.cc.length > 0 ? input.cc : undefined,
       subject: `Usage Invoice — ${input.accountLabel}${input.locationName ? ` (${input.locationName})` : ""} — ${entryDateLabel}`,
       html,
       attachments: [{ filename: "Invoice" + fileExt(input.invoiceUrl), path: input.invoiceUrl }],
     });
-    return { sent: true, recipients: input.to };
+    return { sent: true, recipients: [...input.to, ...input.cc] };
   } catch (err) {
     return { sent: false, error: err instanceof Error ? err.message : "unknown error", recipients: input.to };
   }

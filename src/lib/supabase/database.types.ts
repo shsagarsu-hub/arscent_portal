@@ -309,6 +309,19 @@ export type Asset = {
   updated_at: string;
 };
 
+/** A hospital's own manually-typed running consumption count per product --
+ * purely for their internal stock reconciliation against what they've
+ * physically used, independent of (and never fed back into) the official
+ * usage_log/billing pipeline the account manager works from. */
+export type HospitalManualConsumption = {
+  id: string;
+  account_id: string;
+  item_master_id: string;
+  consumed_qty: number;
+  updated_at: string;
+  updated_by: string | null;
+};
+
 export type ConsignmentBalance = {
   account_id: string;
   account_label: string;
@@ -1016,6 +1029,41 @@ export interface Database {
             columns: ["location_id"];
             isOneToOne: false;
             referencedRelation: "account_locations";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      hospital_manual_consumption: {
+        Row: HospitalManualConsumption;
+        Insert: {
+          id?: string;
+          account_id: string;
+          item_master_id: string;
+          consumed_qty?: number;
+          updated_at?: string;
+          updated_by?: string | null;
+        };
+        Update: {
+          id?: string;
+          account_id?: string;
+          item_master_id?: string;
+          consumed_qty?: number;
+          updated_at?: string;
+          updated_by?: string | null;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "hospital_manual_consumption_account_id_fkey";
+            columns: ["account_id"];
+            isOneToOne: false;
+            referencedRelation: "accounts";
+            referencedColumns: ["id"];
+          },
+          {
+            foreignKeyName: "hospital_manual_consumption_item_master_id_fkey";
+            columns: ["item_master_id"];
+            isOneToOne: false;
+            referencedRelation: "item_master";
             referencedColumns: ["id"];
           },
         ];

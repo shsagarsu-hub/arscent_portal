@@ -21,6 +21,22 @@ import { workOrderNo } from "@/lib/orders/workOrderNo";
 import { ORDER_TYPE_LABELS, ORDER_STATUS_LABELS } from "@/lib/orders/orderTypeLabels";
 import type { OrderStatus, OrderType } from "@/lib/supabase/database.types";
 
+interface StockOnHandRow {
+  key: string;
+  skuName: string;
+  itemName: string;
+  batch: string;
+  expiryDate: string | null;
+}
+
+interface PurchasedConsumedRow {
+  itemMasterId: string;
+  itemName: string;
+  purchased: number;
+  consumed: number;
+  balance: number;
+}
+
 interface UsageRow {
   entry_date: string;
   qty: number;
@@ -148,6 +164,9 @@ export function HospitalReportPanel({ accountId, locationId }: { accountId: stri
   const [usage, setUsage] = useState<UsageRow[] | null>(null);
   const [orders, setOrders] = useState<OrderExportRow[] | null>(null);
   const [period, setPeriod] = useState("12");
+  const [stockOnHand, setStockOnHand] = useState<StockOnHandRow[] | null>(null);
+  const [purchasedConsumed, setPurchasedConsumed] = useState<PurchasedConsumedRow[] | null>(null);
+  const [savingConsumedFor, setSavingConsumedFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     let usageQ = supabase.from("usage_log").select("entry_date, qty, skus(name)").eq("account_id", accountId);
@@ -172,6 +191,140 @@ export function HospitalReportPanel({ accountId, locationId }: { accountId: stri
       await load();
     })();
   }, [load]);
+
+  // Every physical unit currently at this hospital, down to its exact
+  // serial and expiry -- same "still on consignment, not yet logged" set
+  // Log Usage draws from, just flattened for reading rather than for
+  // picking. Consignment stock is tracked per-account, not per-center, so
+  // this pools every shipment across all of this account's centers.
+  const loadStockOnHand = useCallback(async () => {
+    const { data: matchedOrders } = await supabase
+      .from("orders")
+      .select("id, order_type")
+      .eq("account_id", accountId)
+      .in("order_type", ["long_term_consignment", "short_term_consignment"])
+      .not("dc_number", "is", null)
+      .returns<{ id: string; order_type: OrderType }[]>();
+
+    if (!matchedOrders || matchedOrders.length === 0) {
+      setStockOnHand([]);
+      return;
+    }
+    const orderIds = matchedOrders.map((o) => o.id);
+
+    const { data: origLines } = await supabase.from("order_lines").select("id, skus(name)").in("order_id", orderIds);
+    const lineById = new Map((origLines ?? []).map((l) => [l.id, l]));
+    const lineIds = (origLines ?? []).map((l) => l.id);
+    if (lineIds.length === 0) {
+      setStockOnHand([]);
+      return;
+    }
+
+    const [{ data: usageRows }, { data: dcMovements }] = await Promise.all([
+      supabase.from("usage_log").select("source_order_line_id, batch_number").in("source_order_line_id", lineIds),
+      supabase
+        .from("stock_movements")
+        .select("order_line_id, batch_number, expiry_date, item_master(name)")
+        .in("order_line_id", lineIds)
+        .eq("category", "dc_out")
+        .returns<{ order_line_id: string | null; batch_number: string | null; expiry_date: string | null; item_master: { name: string } | null }[]>(),
+    ]);
+
+    const consumedBatchKeys = new Set(
+      (usageRows ?? [])
+        .filter((r) => r.source_order_line_id && r.batch_number)
+        .map((r) => `${r.source_order_line_id}|${r.batch_number}`)
+    );
+
+    const rows: StockOnHandRow[] = (dcMovements ?? [])
+      .filter((m): m is typeof m & { order_line_id: string; batch_number: string } => !!m.order_line_id && !!m.batch_number)
+      .filter((m) => !consumedBatchKeys.has(`${m.order_line_id}|${m.batch_number}`))
+      .map((m) => ({
+        key: `${m.order_line_id}|${m.batch_number}`,
+        skuName: lineById.get(m.order_line_id)?.skus?.name ?? "—",
+        itemName: m.item_master?.name ?? "—",
+        batch: m.batch_number,
+        expiryDate: m.expiry_date,
+      }))
+      .sort((a, b) => (a.expiryDate ?? "9999").localeCompare(b.expiryDate ?? "9999"));
+    setStockOnHand(rows);
+  }, [accountId, supabase]);
+
+  // Purchased (every unit ever shipped to this account, regardless of
+  // whether it's since been used) against Consumed -- a number the hospital
+  // types in themselves for their own physical stock count, not the
+  // official usage_log figure. This is deliberately a separate, manual
+  // field: it's for the hospital's own reconciliation, and the account
+  // manager's Consignment panel never reads it.
+  const loadPurchasedConsumed = useCallback(async () => {
+    const { data: matchedOrders } = await supabase
+      .from("orders")
+      .select("id")
+      .eq("account_id", accountId)
+      .in("order_type", ["long_term_consignment", "short_term_consignment"])
+      .not("dc_number", "is", null);
+
+    const orderIds = (matchedOrders ?? []).map((o) => o.id);
+    let dcMovements: { item_id: string; item_master: { id: string; name: string } | null }[] = [];
+    if (orderIds.length > 0) {
+      const { data: lines } = await supabase.from("order_lines").select("id").in("order_id", orderIds);
+      const lineIds = (lines ?? []).map((l) => l.id);
+      if (lineIds.length > 0) {
+        const { data } = await supabase
+          .from("stock_movements")
+          .select("item_id, item_master(id, name)")
+          .in("order_line_id", lineIds)
+          .eq("category", "dc_out")
+          .returns<{ item_id: string; item_master: { id: string; name: string } | null }[]>();
+        dcMovements = data ?? [];
+      }
+    }
+
+    const purchasedByItem = new Map<string, { name: string; qty: number }>();
+    for (const m of dcMovements) {
+      const name = m.item_master?.name ?? "—";
+      const cur = purchasedByItem.get(m.item_id) ?? { name, qty: 0 };
+      cur.qty += 1;
+      purchasedByItem.set(m.item_id, cur);
+    }
+
+    const { data: manual } = await supabase
+      .from("hospital_manual_consumption")
+      .select("item_master_id, consumed_qty")
+      .eq("account_id", accountId);
+    const consumedByItem = new Map((manual ?? []).map((m) => [m.item_master_id, m.consumed_qty]));
+
+    const rows: PurchasedConsumedRow[] = Array.from(purchasedByItem.entries()).map(([itemMasterId, v]) => {
+      const consumed = consumedByItem.get(itemMasterId) ?? 0;
+      return { itemMasterId, itemName: v.name, purchased: v.qty, consumed, balance: v.qty - consumed };
+    });
+    rows.sort((a, b) => a.itemName.localeCompare(b.itemName));
+    setPurchasedConsumed(rows);
+  }, [accountId, supabase]);
+
+  useEffect(() => {
+    void loadStockOnHand();
+    void loadPurchasedConsumed();
+  }, [loadStockOnHand, loadPurchasedConsumed]);
+
+  async function saveConsumed(itemMasterId: string, value: number) {
+    setSavingConsumedFor(itemMasterId);
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+    const { error } = await supabase.from("hospital_manual_consumption").upsert(
+      { account_id: accountId, item_master_id: itemMasterId, consumed_qty: value, updated_by: user?.id ?? null, updated_at: new Date().toISOString() },
+      { onConflict: "account_id,item_master_id" }
+    );
+    setSavingConsumedFor(null);
+    if (error) {
+      alert("Couldn't save that — " + error.message);
+      return;
+    }
+    setPurchasedConsumed((prev) =>
+      (prev ?? []).map((r) => (r.itemMasterId === itemMasterId ? { ...r, consumed: value, balance: r.purchased - value } : r))
+    );
+  }
 
   const cutoff = useMemo(() => {
     if (period === "all") return null;
@@ -280,6 +433,122 @@ export function HospitalReportPanel({ accountId, locationId }: { accountId: stri
 
   return (
     <div className="space-y-4">
+      <div className="card">
+        <div className="mb-3.5 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider" style={{ color: NEUTRAL }}>
+              Detailed MIS
+            </span>
+            <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">Stock on hand — by serial</h3>
+            <p className="text-xs text-muted">
+              Every unit currently at your account, with its exact serial and expiry — helps you track physical stock.
+            </p>
+          </div>
+          <ExportButton
+            filename="stock-on-hand-mis"
+            columns={[
+              { key: "itemName", label: "SKU" },
+              { key: "batch", label: "Serial Number" },
+              { key: "expiryDate", label: "Expiry Date" },
+              { key: "qty", label: "Qty" },
+            ]}
+            rows={(stockOnHand ?? []).map((r) => ({ itemName: r.itemName, batch: r.batch, expiryDate: r.expiryDate ?? "", qty: 1 }))}
+          />
+        </div>
+        {stockOnHand === null ? (
+          <Loading />
+        ) : stockOnHand.length === 0 ? (
+          <Empty title="Nothing on hand" body="Stock sent to you on consignment will show up here, serial by serial." />
+        ) : (
+          <div className="max-h-80 overflow-y-auto overflow-x-auto">
+            <table className="u-table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Serial Number</th>
+                  <th>Expiry Date</th>
+                  <th>Qty</th>
+                </tr>
+              </thead>
+              <tbody>
+                {stockOnHand.map((r) => (
+                  <tr key={r.key}>
+                    <td className="whitespace-nowrap">{r.itemName}</td>
+                    <td className="whitespace-nowrap font-mono text-[12px]">{r.batch}</td>
+                    <td className="whitespace-nowrap">{r.expiryDate ? new Date(r.expiryDate).toLocaleDateString("en-IN") : "—"}</td>
+                    <td>1</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="mb-3.5 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <span className="text-[10px] font-extrabold uppercase tracking-wider" style={{ color: AMBER }}>
+              Your own tracking
+            </span>
+            <h3 className="mt-0.5 text-[14.5px] font-extrabold text-ink">Purchased − Consumed = Balance</h3>
+            <p className="text-xs text-muted">
+              Enter what you&apos;ve physically used yourself — this is for your own records only and isn&apos;t shared with Arscent.
+            </p>
+          </div>
+          <ExportButton
+            filename="purchased-consumed"
+            columns={[
+              { key: "itemName", label: "SKU" },
+              { key: "purchased", label: "Purchased" },
+              { key: "consumed", label: "Consumed" },
+              { key: "balance", label: "Balance" },
+            ]}
+            rows={purchasedConsumed ?? []}
+          />
+        </div>
+        {purchasedConsumed === null ? (
+          <Loading />
+        ) : purchasedConsumed.length === 0 ? (
+          <Empty title="Nothing received yet" body="Once stock is sent to you, it'll show up here to track against your own usage." />
+        ) : (
+          <div className="max-h-80 overflow-y-auto overflow-x-auto">
+            <table className="u-table">
+              <thead>
+                <tr>
+                  <th>SKU</th>
+                  <th>Purchased</th>
+                  <th>Consumed</th>
+                  <th>Balance</th>
+                </tr>
+              </thead>
+              <tbody>
+                {purchasedConsumed.map((r) => (
+                  <tr key={r.itemMasterId}>
+                    <td className="whitespace-nowrap">{r.itemName}</td>
+                    <td>{r.purchased}</td>
+                    <td>
+                      <input
+                        type="number"
+                        min={0}
+                        defaultValue={r.consumed}
+                        className="w-20 rounded-[4px] border border-border px-2 py-1 text-[12.5px] outline-none focus:border-accent"
+                        disabled={savingConsumedFor === r.itemMasterId}
+                        onBlur={(e) => {
+                          const v = Math.max(0, parseInt(e.target.value, 10) || 0);
+                          if (v !== r.consumed) saveConsumed(r.itemMasterId, v);
+                        }}
+                      />
+                    </td>
+                    <td className={r.balance < 0 ? "font-bold text-bad-fg" : "font-bold"}>{r.balance}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
       <div className="overflow-hidden rounded-[10px] border border-border shadow-[0_1px_3px_rgba(23,37,68,0.06)]">
         <div
           className="flex flex-wrap items-end justify-between gap-3 px-4 py-4 sm:px-5"

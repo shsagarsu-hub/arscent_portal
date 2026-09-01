@@ -33,6 +33,11 @@ const FAMILY_MATCHERS: { test: (upperName: string) => boolean; skuNames: string[
   { test: (n) => n.includes("FLAP"), skuNames: ["FLAP"] },
   { test: (n) => n.includes("ICR"), skuNames: ["ICR Licence"] },
   { test: (n) => n.includes("KERATOPLASTY"), skuNames: ["Keratoplasty Licence"] },
+  // Pack-of-10 variant must be checked before the bare "CIRCLE" rule below --
+  // same reasoning as TRI TORIC before TRI: the more specific product name
+  // has to win, or every "CIRCLE" item_master row (including this one) would
+  // resolve to the older, unpriced single-unit sku instead.
+  { test: (n) => n.includes("CIRCLE") && n.includes("PACK OF 10"), skuNames: ["Circle (Retreatment License) - Pack of 10"] },
   { test: (n) => n.includes("CIRCLE"), skuNames: ["Circle (Retreatment)"] },
 ];
 

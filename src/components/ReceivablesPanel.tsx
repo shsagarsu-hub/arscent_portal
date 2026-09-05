@@ -20,6 +20,20 @@ interface InvoiceLineRow {
   related_invoice_no: string | null;
   qty: number;
   rate: number | null;
+  description_raw: string;
+}
+
+// SMILE/FLAP/ICR/Keratoplasty/Circle lines are licence & treatment-pack
+// products, not physical IOLs -- Arscent's agreement with hospitals treats
+// those as payable upfront (due on the invoice date itself) regardless of
+// the account's own iol_payment_days credit term, which only ever applied
+// to real lens stock. Confirmed against a real invoice dump: no invoice
+// ever mixes an IOL line with one of these, so classifying by keyword
+// anywhere in the invoice's own lines is unambiguous per invoice.
+const UPFRONT_KEYWORDS = ["SMILE", "FLAP", "ICR", "KERATOPLASTY", "CIRCLE"];
+function isUpfrontProduct(descriptionRaw: string): boolean {
+  const upper = descriptionRaw.toUpperCase();
+  return UPFRONT_KEYWORDS.some((k) => upper.includes(k));
 }
 
 interface AccountRow {
@@ -42,6 +56,7 @@ interface Receivable {
   invoiceDate: string;
   total: number;
   dueDate: string | null;
+  isUpfront: boolean;
   daysDue: number;
   payments: PaymentRow[];
   totalReceived: number;
@@ -392,7 +407,7 @@ export function ReceivablesPanel() {
     const [{ data: lines }, { data: accountRows }, { data: payments }] = await Promise.all([
       supabase
         .from("tally_invoice_lines")
-        .select("invoice_no, account_id, invoice_date, document_type, related_invoice_no, qty, rate")
+        .select("invoice_no, account_id, invoice_date, document_type, related_invoice_no, qty, rate, description_raw")
         .order("invoice_date")
         .returns<InvoiceLineRow[]>(),
       supabase.from("accounts").select("id, label, iol_payment_days").returns<AccountRow[]>(),
@@ -408,22 +423,27 @@ export function ReceivablesPanel() {
     });
     const today = todayIso();
 
-    const byInvoice = new Map<string, { accountId: string; invoiceDate: string; total: number }>();
+    const byInvoice = new Map<string, { accountId: string; invoiceDate: string; total: number; isUpfront: boolean }>();
     (lines ?? []).forEach((l) => {
       const key = l.document_type === "invoice" ? l.invoice_no : l.related_invoice_no;
       if (!key) return;
-      const cur = byInvoice.get(key) ?? { accountId: l.account_id, invoiceDate: l.invoice_date, total: 0 };
+      const cur = byInvoice.get(key) ?? { accountId: l.account_id, invoiceDate: l.invoice_date, total: 0, isUpfront: false };
       if (l.document_type === "invoice") {
         cur.accountId = l.account_id;
         cur.invoiceDate = l.invoice_date;
       }
       cur.total += l.qty * (l.rate ?? 0);
+      if (isUpfrontProduct(l.description_raw)) cur.isUpfront = true;
       byInvoice.set(key, cur);
     });
 
     const result: Receivable[] = Array.from(byInvoice.entries()).map(([invoiceNo, v]) => {
       const account = accountMap.get(v.accountId);
-      const dueDate = account?.iol_payment_days != null ? addDays(v.invoiceDate, account.iol_payment_days) : null;
+      const dueDate = v.isUpfront
+        ? v.invoiceDate
+        : account?.iol_payment_days != null
+          ? addDays(v.invoiceDate, account.iol_payment_days)
+          : null;
       const invoicePayments = paymentsByInvoice.get(invoiceNo) ?? [];
       const totalReceived = invoicePayments.reduce((a, p) => a + p.amount_received, 0);
       return {
@@ -433,6 +453,7 @@ export function ReceivablesPanel() {
         invoiceDate: v.invoiceDate,
         total: v.total,
         dueDate,
+        isUpfront: v.isUpfront,
         daysDue: daysBetween(v.invoiceDate, today),
         payments: invoicePayments,
         totalReceived,
@@ -547,7 +568,14 @@ export function ReceivablesPanel() {
                       <td className="whitespace-nowrap font-semibold text-ink">{r.invoiceNo}</td>
                       <td className="text-muted">{r.accountLabel}</td>
                       <td className="text-muted">{r.invoiceDate}</td>
-                      <td className={isOverdue ? "font-bold text-bad-fg" : "text-muted"}>{r.dueDate ?? "—"}</td>
+                      <td className={isOverdue ? "font-bold text-bad-fg" : "text-muted"}>
+                        {r.dueDate ?? "—"}
+                        {r.isUpfront && (
+                          <span className="ml-1.5 badge badge-neutral" title="Licence/treatment-pack product -- due on the invoice date, not the account's IOL payment term">
+                            upfront
+                          </span>
+                        )}
+                      </td>
                       <td className={`text-right ${isOverdue ? "font-bold text-bad-fg" : ""}`}>{r.daysDue}d</td>
                       <td className="text-right font-semibold text-ink">
                         {inr(r.remainingDue)}

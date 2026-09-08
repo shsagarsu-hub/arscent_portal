@@ -36,6 +36,17 @@ function isUpfrontProduct(descriptionRaw: string): boolean {
   return UPFRONT_KEYWORDS.some((k) => upper.includes(k));
 }
 
+// tally_invoice_lines.rate is deliberately ex-GST everywhere else in this
+// app (Revenue/Commitment tracking is ex-GST on purpose -- GST is a
+// pass-through, not Arscent's revenue), but what a hospital actually owes,
+// and what Tally posts to their ledger, is the GST-inclusive total.
+// Confirmed against a real Tally ledger export: every invoice and credit
+// note for the account checked comes out at exactly this ratio (5% GST).
+// Not derived per-line because tally_invoice_lines doesn't persist a GST
+// rate today -- if a product on a different GST slab ever shows up here,
+// this constant needs to become a real per-line rate instead.
+const GST_MULTIPLIER = 1.05;
+
 interface AccountRow {
   id: string;
   label: string;
@@ -446,12 +457,13 @@ export function ReceivablesPanel() {
           : null;
       const invoicePayments = paymentsByInvoice.get(invoiceNo) ?? [];
       const totalReceived = invoicePayments.reduce((a, p) => a + p.amount_received, 0);
+      const total = v.total * GST_MULTIPLIER;
       return {
         invoiceNo,
         accountId: v.accountId,
         accountLabel: account?.label ?? "—",
         invoiceDate: v.invoiceDate,
-        total: v.total,
+        total,
         dueDate,
         isUpfront: v.isUpfront,
         daysDue: daysBetween(v.invoiceDate, today),
@@ -460,7 +472,7 @@ export function ReceivablesPanel() {
         // Floating-point sums can land a hair off zero (e.g. 0.0000000002)
         // -- clamped so a fully-paid invoice doesn't linger in "due" for a
         // fraction of a rupee.
-        remainingDue: Math.max(0, Math.round((v.total - totalReceived) * 100) / 100),
+        remainingDue: Math.max(0, Math.round((total - totalReceived) * 100) / 100),
       };
     });
     result.sort((a, b) => b.daysDue - a.daysDue);

@@ -28,8 +28,13 @@ export async function proxy(request: NextRequest) {
   } = await supabase.auth.getUser();
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login");
+  // Google Sheets' IMPORTDATA (and any other machine caller) can't carry a
+  // Supabase session cookie -- this exact route gates itself on its own
+  // shared-secret token instead (see route.ts), so it's the one path that
+  // must reach the handler without a signed-in user.
+  const isPublicReportRoute = request.nextUrl.pathname === "/api/reports/actual-vs-committed";
 
-  if (!user && !isAuthRoute) {
+  if (!user && !isAuthRoute && !isPublicReportRoute) {
     const url = request.nextUrl.clone();
     url.pathname = "/login";
     return NextResponse.redirect(url);

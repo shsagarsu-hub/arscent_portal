@@ -15,10 +15,10 @@ function csvCell(v: string | number): string {
   return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }
 
-const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-function monthLabel(monthIso: string): string {
-  const [y, m] = monthIso.split("-").map(Number);
-  return `${MONTH_NAMES[m - 1]} ${y}`;
+// Plain numeric month, per request -- ambiguous across a year boundary, but
+// this feed is a rolling few-month tracker, not a multi-year archive.
+function monthLabel(monthIso: string): number {
+  return Number(monthIso.split("-")[1]);
 }
 
 /** Actual qty booked for every account+sku, for one month, from the same
@@ -81,6 +81,11 @@ async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>,
  * defaults to the current month alone) -- a plain CSV can't produce a
  * merged spanning header, so the month label repeats only in that block's
  * first column, close enough to merge by hand once in Sheets if wanted.
+ *
+ * ?account=<substring> scopes the whole feed to one account (case-insensitive
+ * match against the account's label) -- so three separate IMPORTDATA calls,
+ * each with a different account filter, can each land in their own box on
+ * the same sheet instead of one long mixed table.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -91,13 +96,17 @@ export async function GET(request: Request) {
 
   const monthsParam = url.searchParams.get("months");
   const months = monthsParam ? monthsParam.split(",").map((m) => m.trim()) : [thisMonthISO()];
+  const accountFilter = url.searchParams.get("account")?.trim().toLowerCase() || null;
 
   const supabase = createAdminClient();
 
-  const { data: skuRows } = await supabase
+  const { data: allSkuRows } = await supabase
     .from("skus")
     .select("id, name, account_id, commitment_per_month, accounts(label, commitment_start)")
     .returns<SkuRow[]>();
+  const skuRows = accountFilter
+    ? (allSkuRows ?? []).filter((s) => s.accounts?.label.toLowerCase().includes(accountFilter))
+    : allSkuRows;
 
   // SKUs with no commitment target and no actual booking in ANY requested
   // month are noise on a tracker meant to flag surplus/shortfall -- dropped

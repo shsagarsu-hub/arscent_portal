@@ -7,6 +7,7 @@ interface SkuRow {
   name: string;
   account_id: string;
   commitment_per_month: number | null;
+  units_per_pack: number | null;
   accounts: { label: string; commitment_start: string | null } | null;
 }
 
@@ -152,7 +153,7 @@ export async function GET(request: Request) {
   const [{ data: allSkuRows }, { data: locationRows }] = await Promise.all([
     supabase
       .from("skus")
-      .select("id, name, account_id, commitment_per_month, accounts(label, commitment_start)")
+      .select("id, name, account_id, commitment_per_month, units_per_pack, accounts(label, commitment_start)")
       .returns<SkuRow[]>(),
     supabase.from("account_locations").select("id, name").returns<{ id: string; name: string }[]>(),
   ]);
@@ -190,7 +191,10 @@ export async function GET(request: Request) {
         .sort((a, b) => (locationNames.get(a) ?? "").localeCompare(locationNames.get(b) ?? ""))
         .map((locId) => {
           const line: (string | number)[] = [s.accounts?.label ?? "—", locationNames.get(locId) ?? "Unknown branch", s.name];
-          for (const month of months) line.push(qtyByMonth.get(month)?.locationQtyMap.get(`${s.account_id}|${s.id}|${locId}`) ?? 0);
+          for (const month of months) {
+            const placedQty = qtyByMonth.get(month)?.locationQtyMap.get(`${s.account_id}|${s.id}|${locId}`) ?? 0;
+            line.push(placedQty * (s.units_per_pack || 1));
+          }
           return line;
         });
     });
@@ -208,7 +212,11 @@ export async function GET(request: Request) {
       for (const month of months) {
         const eligible = !s.accounts?.commitment_start || s.accounts.commitment_start.slice(0, 7) <= month;
         const committedQty = eligible ? s.commitment_per_month ?? 0 : 0;
-        const actualQty = qtyByMonth.get(month)?.qtyMap.get(`${s.account_id}|${s.id}`) ?? 0;
+        // Matches CommittedPanel.tsx's own math exactly: raw booked qty is in
+        // packs, commitment_per_month is a per-unit target, so this needs the
+        // same units_per_pack conversion the portal's own panel applies --
+        // otherwise this feed silently disagreed with the number in the app.
+        const actualQty = (qtyByMonth.get(month)?.qtyMap.get(`${s.account_id}|${s.id}`) ?? 0) * (s.units_per_pack || 1);
         const diff = actualQty - committedQty;
         const remarks = diff > 0 ? "Surplus" : diff < 0 ? "Shortfall" : "On Target";
         line.push(actualQty, committedQty, diff, remarks);

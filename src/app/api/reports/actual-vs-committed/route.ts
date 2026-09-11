@@ -123,6 +123,17 @@ async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>,
  * match against the account's label) -- so three separate IMPORTDATA calls,
  * each with a different account filter, can each land in their own box on
  * the same sheet instead of one long mixed table.
+ *
+ * ?breakdown=locations switches to a SEPARATE, smaller feed: one row per
+ * account+SKU+branch (Actual only, no Committed/Diff/Remarks -- a commitment
+ * target belongs to the account+SKU as a whole, not to one branch of it).
+ * This must stay a distinct mode rather than extra rows inlined into the
+ * normal feed: a downstream sheet's box formulas often pull an exact cell or
+ * range by position, and any month where a branch account (e.g. LVPEI) picks
+ * up or drops a location shifts every row below it in the normal feed --
+ * every other account's numbers included, since sorting is alphabetical by
+ * account label. That happened once already; this mode exists so branch
+ * detail can live in its own box without ever moving anyone else's row.
  */
 export async function GET(request: Request) {
   const url = new URL(request.url);
@@ -134,6 +145,7 @@ export async function GET(request: Request) {
   const monthsParam = url.searchParams.get("months");
   const months = monthsParam ? monthsParam.split(",").map((m) => m.trim()) : [thisMonthISO()];
   const accountFilter = url.searchParams.get("account")?.trim().toLowerCase() || null;
+  const breakdown = url.searchParams.get("breakdown");
 
   const supabase = createAdminClient();
 
@@ -163,49 +175,49 @@ export async function GET(request: Request) {
     .filter((s) => s.commitment_per_month != null || hasAnyActual(s.account_id, s.id))
     .sort((a, b) => (a.accounts?.label ?? "").localeCompare(b.accounts?.label ?? "") || a.name.localeCompare(b.name));
 
-  const header1: (string | number)[] = ["", ""];
-  const header2: (string | number)[] = ["Account", "Product"];
-  for (const month of months) {
-    header1.push(monthLabel(month), "", "", "");
-    header2.push("Actual", "Committed", "Diff", "Remarks");
-  }
-
-  const dataLines = rows.flatMap((s) => {
-    const line: (string | number)[] = [s.accounts?.label ?? "—", s.name];
-    // Every location_id seen for this account+sku across the requested
-    // months, so a branch that only shipped in one of several months still
-    // gets its own row (blank elsewhere) instead of vanishing.
-    const locationIds = new Set<string>();
-    for (const month of months) {
-      const eligible = !s.accounts?.commitment_start || s.accounts.commitment_start.slice(0, 7) <= month;
-      const committedQty = eligible ? s.commitment_per_month ?? 0 : 0;
-      const actualQty = qtyByMonth.get(month)?.qtyMap.get(`${s.account_id}|${s.id}`) ?? 0;
-      const diff = actualQty - committedQty;
-      const remarks = diff > 0 ? "Surplus" : diff < 0 ? "Shortfall" : "On Target";
-      line.push(actualQty, committedQty, diff, remarks);
-      for (const key of qtyByMonth.get(month)?.locationQtyMap.keys() ?? []) {
-        if (key.startsWith(`${s.account_id}|${s.id}|`)) locationIds.add(key.split("|")[2]);
-      }
-    }
-    if (locationIds.size === 0) return [line];
-    // Branch breakdown rows -- Actual only, no Committed/Diff/Remarks: the
-    // commitment target is set per account+sku as a whole, not per branch,
-    // so splitting it three ways would misrepresent it as three separate
-    // targets instead of one shared one.
-    const branchLines = Array.from(locationIds)
-      .sort((a, b) => (locationNames.get(a) ?? "").localeCompare(locationNames.get(b) ?? ""))
-      .map((locId) => {
-        const branchLine: (string | number)[] = [`  ↳ ${locationNames.get(locId) ?? "Unknown branch"}`, s.name];
-        for (const month of months) {
-          const placedQty = qtyByMonth.get(month)?.locationQtyMap.get(`${s.account_id}|${s.id}|${locId}`) ?? 0;
-          branchLine.push(placedQty, "", "", "");
+  let csv: string;
+  if (breakdown === "locations") {
+    const header: (string | number)[] = ["Account", "Branch", "Product"];
+    for (const month of months) header.push(monthLabel(month));
+    const branchLines = rows.flatMap((s) => {
+      const locationIds = new Set<string>();
+      for (const month of months) {
+        for (const key of qtyByMonth.get(month)?.locationQtyMap.keys() ?? []) {
+          if (key.startsWith(`${s.account_id}|${s.id}|`)) locationIds.add(key.split("|")[2]);
         }
-        return branchLine;
-      });
-    return [line, ...branchLines];
-  });
+      }
+      return Array.from(locationIds)
+        .sort((a, b) => (locationNames.get(a) ?? "").localeCompare(locationNames.get(b) ?? ""))
+        .map((locId) => {
+          const line: (string | number)[] = [s.accounts?.label ?? "—", locationNames.get(locId) ?? "Unknown branch", s.name];
+          for (const month of months) line.push(qtyByMonth.get(month)?.locationQtyMap.get(`${s.account_id}|${s.id}|${locId}`) ?? 0);
+          return line;
+        });
+    });
+    csv = [header, ...branchLines].map((line) => line.map(csvCell).join(",")).join("\n");
+  } else {
+    const header1: (string | number)[] = ["", ""];
+    const header2: (string | number)[] = ["Account", "Product"];
+    for (const month of months) {
+      header1.push(monthLabel(month), "", "", "");
+      header2.push("Actual", "Committed", "Diff", "Remarks");
+    }
 
-  const csv = [header1, header2, ...dataLines].map((line) => line.map(csvCell).join(",")).join("\n");
+    const dataLines = rows.map((s) => {
+      const line: (string | number)[] = [s.accounts?.label ?? "—", s.name];
+      for (const month of months) {
+        const eligible = !s.accounts?.commitment_start || s.accounts.commitment_start.slice(0, 7) <= month;
+        const committedQty = eligible ? s.commitment_per_month ?? 0 : 0;
+        const actualQty = qtyByMonth.get(month)?.qtyMap.get(`${s.account_id}|${s.id}`) ?? 0;
+        const diff = actualQty - committedQty;
+        const remarks = diff > 0 ? "Surplus" : diff < 0 ? "Shortfall" : "On Target";
+        line.push(actualQty, committedQty, diff, remarks);
+      }
+      return line;
+    });
+
+    csv = [header1, header2, ...dataLines].map((line) => line.map(csvCell).join(",")).join("\n");
+  }
 
   return new Response(csv, {
     status: 200,

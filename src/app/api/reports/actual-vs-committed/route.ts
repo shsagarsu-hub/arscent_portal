@@ -21,14 +21,31 @@ function monthLabel(monthIso: string): number {
   return Number(monthIso.split("-")[1]);
 }
 
+interface MonthActuals {
+  /** account_id|sku_id -> qty, the number that drives Committed/Diff/Remarks. */
+  qtyMap: Map<string, number>;
+  /** account_id|sku_id|location_id -> qty, for accounts whose placement is
+   * tracked per branch (currently only LVPEI's consignment orders carry a
+   * location_id) -- purely a breakdown of the total already in qtyMap, never
+   * added on top of it. */
+  locationQtyMap: Map<string, number>;
+}
+
 /** Actual qty booked for every account+sku, for one month, from the same
  * three real revenue sources RevenueMarginPanel uses (Tally invoices, billed
  * consignment, closed Saleable orders) -- qty only counts on a
  * revenue-bearing line, same rule that drops $0 duplicate stock-tracking
- * lines paired with a licence line. */
-async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>, month: string) {
+ * lines paired with a licence line -- PLUS closed long-term-consignment
+ * orders (library stock physically placed at a hospital, e.g. LVPEI's CT
+ * LUCIA lens library). Those orders have no invoice_date/invoice_number --
+ * billing happens later, off a usage statement -- so they're bucketed by
+ * dc_date instead and counted regardless of revenue: the commitment they're
+ * tracked against ("units placed this month") is a physical-placement
+ * target, not a billing one, so gating on revenue would hide real progress
+ * that hasn't been invoiced yet. */
+async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>, month: string): Promise<MonthActuals> {
   const { start, end } = monthBounds(month);
-  const [{ data: tallyRows }, { data: billedRows }, { data: closedRows }] = await Promise.all([
+  const [{ data: tallyRows }, { data: billedRows }, { data: closedRows }, { data: consignmentRows }] = await Promise.all([
     supabase
       .from("tally_invoice_lines")
       .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
@@ -53,9 +70,18 @@ async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>,
       .returns<
         { account_id: string | null; invoice_date: string | null; invoice_number: string | null; order_lines: { sku_id: string; qty: number; net_price: number | null }[] }[]
       >(),
+    supabase
+      .from("orders")
+      .select("account_id, location_id, dc_date, order_lines(sku_id, qty)")
+      .eq("order_type", "long_term_consignment")
+      .eq("status", "closed")
+      .gte("dc_date", start)
+      .lt("dc_date", end)
+      .returns<{ account_id: string | null; location_id: string | null; dc_date: string | null; order_lines: { sku_id: string; qty: number }[] }[]>(),
   ]);
 
   const qtyMap = new Map<string, number>();
+  const locationQtyMap = new Map<string, number>();
   function add(accountId: string | null, skuId: string | null, qty: number, revenue: number) {
     if (!accountId || !skuId || revenue <= 0) return;
     const key = `${accountId}|${skuId}`;
@@ -67,7 +93,18 @@ async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>,
   (closedRows ?? [])
     .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
     .forEach((o) => o.order_lines.forEach((l) => add(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
-  return qtyMap;
+  (consignmentRows ?? []).forEach((o) => {
+    if (!o.account_id) return;
+    o.order_lines.forEach((l) => {
+      const key = `${o.account_id}|${l.sku_id}`;
+      qtyMap.set(key, (qtyMap.get(key) ?? 0) + (l.qty || 0));
+      if (o.location_id) {
+        const locKey = `${key}|${o.location_id}`;
+        locationQtyMap.set(locKey, (locationQtyMap.get(locKey) ?? 0) + (l.qty || 0));
+      }
+    });
+  });
+  return { qtyMap, locationQtyMap };
 }
 
 /**
@@ -100,10 +137,14 @@ export async function GET(request: Request) {
 
   const supabase = createAdminClient();
 
-  const { data: allSkuRows } = await supabase
-    .from("skus")
-    .select("id, name, account_id, commitment_per_month, accounts(label, commitment_start)")
-    .returns<SkuRow[]>();
+  const [{ data: allSkuRows }, { data: locationRows }] = await Promise.all([
+    supabase
+      .from("skus")
+      .select("id, name, account_id, commitment_per_month, accounts(label, commitment_start)")
+      .returns<SkuRow[]>(),
+    supabase.from("account_locations").select("id, name").returns<{ id: string; name: string }[]>(),
+  ]);
+  const locationNames = new Map((locationRows ?? []).map((l) => [l.id, l.name]));
   const skuRows = accountFilter
     ? (allSkuRows ?? []).filter((s) => s.accounts?.label.toLowerCase().includes(accountFilter))
     : allSkuRows;
@@ -111,12 +152,12 @@ export async function GET(request: Request) {
   // SKUs with no commitment target and no actual booking in ANY requested
   // month are noise on a tracker meant to flag surplus/shortfall -- dropped
   // the same way the single-month version already did.
-  const qtyByMonth = new Map<string, Map<string, number>>();
+  const qtyByMonth = new Map<string, MonthActuals>();
   for (const month of months) {
     qtyByMonth.set(month, await actualQtyForMonth(supabase, month));
   }
   const hasAnyActual = (accountId: string, skuId: string) =>
-    months.some((m) => (qtyByMonth.get(m)?.get(`${accountId}|${skuId}`) ?? 0) > 0);
+    months.some((m) => (qtyByMonth.get(m)?.qtyMap.get(`${accountId}|${skuId}`) ?? 0) > 0);
 
   const rows = (skuRows ?? [])
     .filter((s) => s.commitment_per_month != null || hasAnyActual(s.account_id, s.id))
@@ -129,17 +170,39 @@ export async function GET(request: Request) {
     header2.push("Actual", "Committed", "Diff", "Remarks");
   }
 
-  const dataLines = rows.map((s) => {
+  const dataLines = rows.flatMap((s) => {
     const line: (string | number)[] = [s.accounts?.label ?? "—", s.name];
+    // Every location_id seen for this account+sku across the requested
+    // months, so a branch that only shipped in one of several months still
+    // gets its own row (blank elsewhere) instead of vanishing.
+    const locationIds = new Set<string>();
     for (const month of months) {
       const eligible = !s.accounts?.commitment_start || s.accounts.commitment_start.slice(0, 7) <= month;
       const committedQty = eligible ? s.commitment_per_month ?? 0 : 0;
-      const actualQty = qtyByMonth.get(month)?.get(`${s.account_id}|${s.id}`) ?? 0;
+      const actualQty = qtyByMonth.get(month)?.qtyMap.get(`${s.account_id}|${s.id}`) ?? 0;
       const diff = actualQty - committedQty;
       const remarks = diff > 0 ? "Surplus" : diff < 0 ? "Shortfall" : "On Target";
       line.push(actualQty, committedQty, diff, remarks);
+      for (const key of qtyByMonth.get(month)?.locationQtyMap.keys() ?? []) {
+        if (key.startsWith(`${s.account_id}|${s.id}|`)) locationIds.add(key.split("|")[2]);
+      }
     }
-    return line;
+    if (locationIds.size === 0) return [line];
+    // Branch breakdown rows -- Actual only, no Committed/Diff/Remarks: the
+    // commitment target is set per account+sku as a whole, not per branch,
+    // so splitting it three ways would misrepresent it as three separate
+    // targets instead of one shared one.
+    const branchLines = Array.from(locationIds)
+      .sort((a, b) => (locationNames.get(a) ?? "").localeCompare(locationNames.get(b) ?? ""))
+      .map((locId) => {
+        const branchLine: (string | number)[] = [`  ↳ ${locationNames.get(locId) ?? "Unknown branch"}`, s.name];
+        for (const month of months) {
+          const placedQty = qtyByMonth.get(month)?.locationQtyMap.get(`${s.account_id}|${s.id}|${locId}`) ?? 0;
+          branchLine.push(placedQty, "", "", "");
+        }
+        return branchLine;
+      });
+    return [line, ...branchLines];
   });
 
   const csv = [header1, header2, ...dataLines].map((line) => line.map(csvCell).join(",")).join("\n");

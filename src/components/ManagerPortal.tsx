@@ -44,10 +44,21 @@ interface UsageRow {
 interface TallyLineRow {
   sku_id: string | null;
   account_id: string | null;
+  item_id: string | null;
   qty: number;
   rate: number | null;
   invoice_date: string;
   invoice_no: string;
+}
+
+interface CreditNoteRow {
+  sku_id: string | null;
+  account_id: string | null;
+  item_id: string | null;
+  qty: number;
+  rate: number | null;
+  invoice_date: string | null;
+  related_invoice_no: string | null;
 }
 
 interface BilledConsignmentRow {
@@ -79,6 +90,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   const [skus, setSkus] = useState<SkuRow[] | null>(null);
   const [usage, setUsage] = useState<UsageRow[] | null>(null);
   const [tallyLines, setTallyLines] = useState<TallyLineRow[] | null>(null);
+  const [creditNotes, setCreditNotes] = useState<CreditNoteRow[] | null>(null);
   const [billedConsignment, setBilledConsignment] = useState<BilledConsignmentRow[] | null>(null);
   const [closedSaleable, setClosedSaleable] = useState<ClosedSaleableRow[] | null>(null);
   const [orders, setOrders] = useState<OrderRow[] | null>(null);
@@ -105,6 +117,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       { data: skuRows },
       { data: usageRows },
       { data: tallyRows },
+      { data: creditNoteRows },
       { data: billedRows },
       { data: closedSaleableRows },
       { data: orderRows },
@@ -135,11 +148,27 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
       // qty * rate with no such filter, letting the signed rate net them in.
       supabase
         .from("tally_invoice_lines")
-        .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
+        .select("sku_id, account_id, item_id, qty, rate, invoice_date, invoice_no")
         .eq("document_type", "invoice")
         .gte("invoice_date", start)
         .lt("invoice_date", end)
         .returns<TallyLineRow[]>(),
+      // A credit note only reduces the qty counted toward the commitment
+      // target when it's a genuine full-value reversal (checked below against
+      // the original invoice line's own rate for the same item) -- most
+      // credit notes are a flat/partial discount with qty untouched (e.g. a
+      // real one here: -Rs.5,000 off a Rs.41,904.76 line), so a blanket
+      // netting would wrongly deduct units that were never actually returned.
+      // Fetched unfiltered by date (there are only a handful company-wide) --
+      // a credit note is often dated after its original invoice, sometimes in
+      // a month outside the currently selected range, but it should still
+      // adjust that invoice's own month; matching against tallyLines (already
+      // scoped to the selected months) below is what actually bounds this.
+      supabase
+        .from("tally_invoice_lines")
+        .select("sku_id, account_id, item_id, qty, rate, invoice_date, related_invoice_no")
+        .eq("document_type", "credit_note")
+        .returns<CreditNoteRow[]>(),
       supabase
         .from("billing_requests")
         .select("sku_id, account_id, qty, amount, invoice_date")
@@ -169,6 +198,10 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     setSkus(skuRows ?? []);
     setUsage((usageRows ?? []).filter((u) => inSelectedMonths(u.entry_date)));
     setTallyLines((tallyRows ?? []).filter((t) => inSelectedMonths(t.invoice_date)));
+    // Not filtered by invoice_date -- matched against tallyLines below by
+    // related_invoice_no + item_id instead, so a credit note dated outside
+    // the selected months can still adjust an original invoice that's inside them.
+    setCreditNotes(creditNoteRows ?? []);
     setBilledConsignment((billedRows ?? []).filter((b) => inSelectedMonths(b.invoice_date)));
     setClosedSaleable((closedSaleableRows ?? []).filter((o) => inSelectedMonths(o.invoice_date)));
     setOrders(orderRows ?? []);
@@ -237,6 +270,7 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
     skus === null ||
     usage === null ||
     tallyLines === null ||
+    creditNotes === null ||
     billedConsignment === null ||
     closedSaleable === null ||
     orders === null
@@ -281,6 +315,29 @@ export function ManagerPortal({ canManageAccounts }: { canManageAccounts: boolea
   closedSaleable
     .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
     .forEach((o) => o.order_lines.forEach((l) => addActual(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
+
+  // A credit note only reduces actual qty when it's a genuine full-value
+  // reversal of the item it references -- its rate exactly cancels the
+  // original invoice line's own rate for that same item (matched via
+  // related_invoice_no + item_id). A flat/partial discount never matches
+  // (confirmed on a real one: -Rs.5,000 off a Rs.41,904.76 line), so it
+  // correctly leaves qty untouched. Matching against tallyLines (already
+  // scoped to the selected months) is what attributes the adjustment to the
+  // ORIGINAL invoice's month, even when the credit note itself is dated
+  // later, possibly outside the current selection.
+  const rateByInvoiceItem = new Map<string, number>();
+  tallyLines.forEach((t) => {
+    if (t.item_id) rateByInvoiceItem.set(`${t.invoice_no}|${t.item_id}`, t.rate ?? 0);
+  });
+  creditNotes.forEach((c) => {
+    if (!c.account_id || !c.sku_id || !c.item_id || !c.related_invoice_no) return;
+    const originalRate = rateByInvoiceItem.get(`${c.related_invoice_no}|${c.item_id}`);
+    if (originalRate == null) return; // original invoice isn't in the selected months
+    const isFullReversal = Math.abs((c.rate ?? 0) + originalRate) < 0.01;
+    if (!isFullReversal) return;
+    const key = `${c.account_id}|${c.sku_id}`;
+    actualBySku.set(key, (actualBySku.get(key) ?? 0) - c.qty);
+  });
 
   const centersReporting = new Set(usage.map((u) => `${u.account_id}|${u.location_id}`)).size;
   // How many of the selected months actually count toward this SKU's

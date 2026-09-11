@@ -22,6 +22,15 @@ function monthLabel(monthIso: string): number {
   return Number(monthIso.split("-")[1]);
 }
 
+interface CreditNoteRow {
+  sku_id: string | null;
+  account_id: string | null;
+  item_id: string | null;
+  qty: number;
+  rate: number | null;
+  related_invoice_no: string | null;
+}
+
 /** Actual qty booked for every account+sku, for one calendar month, from the
  * exact same three sources and revenue-gating ManagerPortal.tsx's actualBySku
  * uses (Tally invoices, billed consignment, closed Saleable orders) -- no
@@ -29,17 +38,26 @@ function monthLabel(monthIso: string): number {
  * long_term_consignment orders (LVPEI's CT LUCIA library) since those don't
  * carry an invoice_date/invoice_number either -- that made this feed diverge
  * from what the app itself shows (LVPEI read 500 here, 0 on screen), so it's
- * gone: if ManagerPortal doesn't count it, this feed doesn't either. */
-async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>, month: string) {
+ * gone: if ManagerPortal doesn't count it, this feed doesn't either.
+ *
+ * `allCreditNotes` is passed in already fetched (not re-queried per month --
+ * there are only a handful company-wide) so a credit note issued in a LATER
+ * month than its own original invoice still nets against the invoice's own
+ * month here: it's matched to this month's tallyRows by related_invoice_no +
+ * item_id, not by the credit note's own invoice_date. Only a genuine
+ * full-value reversal counts (credit note rate exactly cancels the original
+ * line's rate) -- a flat/partial discount (e.g. a real one here: -Rs.5,000
+ * off a Rs.41,904.76 line) never matches, so qty stays untouched for it. */
+async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>, month: string, allCreditNotes: CreditNoteRow[]) {
   const { start, end } = monthBounds(month);
   const [{ data: tallyRows }, { data: billedRows }, { data: closedRows }] = await Promise.all([
     supabase
       .from("tally_invoice_lines")
-      .select("sku_id, account_id, qty, rate, invoice_date, invoice_no")
+      .select("sku_id, account_id, item_id, qty, rate, invoice_date, invoice_no")
       .eq("document_type", "invoice")
       .gte("invoice_date", start)
       .lt("invoice_date", end)
-      .returns<{ sku_id: string | null; account_id: string | null; qty: number; rate: number | null; invoice_date: string; invoice_no: string }[]>(),
+      .returns<{ sku_id: string | null; account_id: string | null; item_id: string | null; qty: number; rate: number | null; invoice_date: string; invoice_no: string }[]>(),
     supabase
       .from("billing_requests")
       .select("sku_id, account_id, qty, amount, invoice_date")
@@ -71,6 +89,21 @@ async function actualQtyForMonth(supabase: ReturnType<typeof createAdminClient>,
   (closedRows ?? [])
     .filter((o) => !(o.invoice_number && tallyInvoiceNos.has(o.invoice_number)))
     .forEach((o) => o.order_lines.forEach((l) => add(o.account_id, l.sku_id, l.qty, l.qty * (l.net_price ?? 0))));
+
+  const rateByInvoiceItem = new Map<string, number>();
+  (tallyRows ?? []).forEach((t) => {
+    if (t.item_id) rateByInvoiceItem.set(`${t.invoice_no}|${t.item_id}`, t.rate ?? 0);
+  });
+  allCreditNotes.forEach((c) => {
+    if (!c.account_id || !c.sku_id || !c.item_id || !c.related_invoice_no) return;
+    const originalRate = rateByInvoiceItem.get(`${c.related_invoice_no}|${c.item_id}`);
+    if (originalRate == null) return; // original invoice isn't in THIS month -- not this month's adjustment
+    const isFullReversal = Math.abs((c.rate ?? 0) + originalRate) < 0.01;
+    if (!isFullReversal) return;
+    const key = `${c.account_id}|${c.sku_id}`;
+    qtyMap.set(key, (qtyMap.get(key) ?? 0) - c.qty);
+  });
+
   return qtyMap;
 }
 
@@ -113,10 +146,20 @@ export async function GET(request: Request) {
 
   const supabase = createAdminClient();
 
-  const { data: allSkuRows } = await supabase
-    .from("skus")
-    .select("id, name, account_id, commitment_per_month, units_per_pack, accounts(label, commitment_start)")
-    .returns<SkuRow[]>();
+  const [{ data: allSkuRows }, { data: creditNoteRows }] = await Promise.all([
+    supabase
+      .from("skus")
+      .select("id, name, account_id, commitment_per_month, units_per_pack, accounts(label, commitment_start)")
+      .returns<SkuRow[]>(),
+    // Fetched once, unfiltered by date -- there are only a handful of credit
+    // notes company-wide, and one can be dated well after the invoice it
+    // corrects, so it can't be scoped to any single month's window up front.
+    supabase
+      .from("tally_invoice_lines")
+      .select("sku_id, account_id, item_id, qty, rate, related_invoice_no")
+      .eq("document_type", "credit_note")
+      .returns<CreditNoteRow[]>(),
+  ]);
   const skuRows = accountFilter
     ? (allSkuRows ?? []).filter((s) => s.accounts?.label.toLowerCase().includes(accountFilter))
     : allSkuRows;
@@ -126,7 +169,7 @@ export async function GET(request: Request) {
   // the same way the single-month version already did.
   const qtyByMonth = new Map<string, Map<string, number>>();
   for (const month of months) {
-    qtyByMonth.set(month, await actualQtyForMonth(supabase, month));
+    qtyByMonth.set(month, await actualQtyForMonth(supabase, month, creditNoteRows ?? []));
   }
   const hasAnyActual = (accountId: string, skuId: string) =>
     months.some((m) => (qtyByMonth.get(m)?.get(`${accountId}|${skuId}`) ?? 0) > 0);
